@@ -54,9 +54,17 @@ class PostgresStore:
     async def connect(cls, dsn, schema="parley"):
         if not schema.replace("_", "").isalnum():
             raise ValueError(f"invalid schema name: {schema!r}")
+        # Postgres case-folds the server_settings search_path (an unquoted value) to
+        # lowercase, so normalize the name to keep it consistent with the quoted
+        # CREATE SCHEMA / CREATE TABLE identifiers (else a mixed-case name would
+        # create "Foo" but resolve tables against "foo" and crash at startup).
+        schema = schema.lower()
 
+        # timeout=10 so a blackholed DSN fails fast instead of stalling serve on
+        # asyncpg's ~60s default (refused connections already fail instantly).
         pool = await asyncpg.create_pool(
-            dsn, min_size=1, max_size=4, server_settings={"search_path": schema})
+            dsn, min_size=1, max_size=4, timeout=10,
+            server_settings={"search_path": schema})
         async with pool.acquire() as c:
             await c.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
             await c.execute(_SCHEMA_DDL)
@@ -151,11 +159,14 @@ class PostgresStore:
         pred, _extra = self_filter(agent_id, box, "from_agent", "$3", "$4", box_view=box_view)
         cursor_col = "delivery_read_id" if box_view else "last_read_id"
         out = []
+        # Only a cursor-advancing poll needs to serialize (FOR UPDATE) on the member
+        # rows; a read-only peek takes no lock so it never blocks concurrent polls.
+        lock = " FOR UPDATE" if advance else ""
         async with self._pool.acquire() as c, c.transaction():
             members = await c.fetch(
                 f"SELECT conv_id,{cursor_col} AS cursor FROM conv_members "
                 "WHERE agent_id=$1 AND ($2::text IS NULL OR conv_id=$2) "
-                "ORDER BY conv_id FOR UPDATE", agent_id, room)
+                f"ORDER BY conv_id{lock}", agent_id, room)
             for m in members:
                 rows = await c.fetch(
                     "SELECT id,from_agent,body,created_at FROM conv_messages "
