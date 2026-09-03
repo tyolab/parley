@@ -2,6 +2,8 @@ import asyncio
 import datetime
 import aiosqlite
 
+from parley.core.store import self_filter
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
   id         TEXT PRIMARY KEY,
@@ -132,11 +134,40 @@ class SqliteStore:
             await self._db.commit()
             return (await cur.fetchone())["n"]
 
+    async def _collect(self, agent_id, room, box, advance, box_view):
+        pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
+                                   box_view=box_view)
+        out = []
+        async with self._wlock:
+            cur = await self._db.execute(
+                "SELECT conv_id,last_read_id FROM conv_members "
+                "WHERE agent_id=? AND (? IS NULL OR conv_id=?) ORDER BY conv_id",
+                (agent_id, room, room))
+            members = await cur.fetchall()
+            for m in members:
+                q = ("SELECT id,from_agent,body,created_at FROM conv_messages "
+                     f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id")
+                mc = await self._db.execute(q, {"conv": m["conv_id"], "last": m["last_read_id"],
+                                                "agent": agent_id, "box": box})
+                rows = await mc.fetchall()
+                if not rows:
+                    continue
+                if advance:
+                    await self._db.execute(
+                        "UPDATE conv_members SET last_read_id=? WHERE conv_id=? AND agent_id=?",
+                        (rows[-1]["id"], m["conv_id"], agent_id))
+                out.append({"conv": m["conv_id"], "messages": [
+                    {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
+                    for r in rows]})
+            if advance:
+                await self._db.commit()
+        return out
+
     async def poll(self, agent_id, room=None, box=None, box_view=False):
-        raise NotImplementedError("Task 4")
+        return await self._collect(agent_id, room, box, advance=True, box_view=box_view)
 
     async def peek(self, agent_id, room=None, box=None, box_view=False):
-        raise NotImplementedError("Task 4")
+        return await self._collect(agent_id, room, box, advance=False, box_view=box_view)
 
     async def list_rooms(self, agent_id, box=None):
         raise NotImplementedError("Task 5")
