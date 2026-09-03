@@ -35,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     tk.add_argument("--admin-token", required=True)
     tk.add_argument("--box", required=True)
     tk.add_argument("--label", default=None)
+
+    ini = sub.add_parser("init", help="write the Parley MCP server into an agent config")
+    ini.add_argument("--url", required=True, help="the gateway MCP URL, e.g. http://host:8791/mcp")
+    ini.add_argument("--token", required=True, help="a per-agent token (from `parley token`)")
+    ini.add_argument("--name", default="parley")
+    ini.add_argument("--file", default=os.path.expanduser("~/.claude.json"))
     return p
 
 
@@ -104,6 +110,12 @@ async def _token(args):
         print(r.json()["token"])
 
 
+def _init(args):
+    from parley.cli.init_config import merge_mcp_entry
+    merge_mcp_entry(args.file, name=args.name, url=args.url, token=args.token)
+    print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
+
+
 async def _watch(cfg, room, interval):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
@@ -125,6 +137,9 @@ def main(argv=None):
         return
     if args.cmd == "token":
         asyncio.run(_token(args))
+        return
+    if args.cmd == "init":
+        _init(args)
         return
     cfg = resolve_config(args)
     if args.cmd == "say":
