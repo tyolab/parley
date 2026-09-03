@@ -13,6 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8790)
     s.add_argument("--db", default=None)
     s.add_argument("--token", default=None)
+    s.add_argument("--mcp-port", type=int, default=None)
+    s.add_argument("--no-mcp", action="store_true")
 
     for name, help_ in [("join", "join a room"), ("watch", "watch/participate in rooms")]:
         c = sub.add_parser(name, help=help_)
@@ -27,6 +29,18 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("text")
     sy.add_argument("--gw", default=None)
     sy.add_argument("--agent", default=None)
+
+    tk = sub.add_parser("token", help="mint a per-agent token (admin)")
+    tk.add_argument("--gw", default=None)
+    tk.add_argument("--admin-token", required=True)
+    tk.add_argument("--box", required=True)
+    tk.add_argument("--label", default=None)
+
+    ini = sub.add_parser("init", help="write the Parley MCP server into an agent config")
+    ini.add_argument("--url", required=True, help="the gateway MCP URL, e.g. http://host:8791/mcp")
+    ini.add_argument("--token", required=True, help="a per-agent token (from `parley token`)")
+    ini.add_argument("--name", default="parley")
+    ini.add_argument("--file", default=os.path.expanduser("~/.claude.json"))
     return p
 
 
@@ -46,21 +60,45 @@ def _db_path(args) -> str:
 
 
 def _serve(args):
+    import contextlib
+    import signal
+
     import uvicorn
 
     from parley.gateway.app import build_app
+    from parley.mcp.server import build_mcp_app
     from parley.stores.sqlite import SqliteStore
     from parley.transports.polling import PollingTransport
 
     async def _run():
-        # Connect the store and run uvicorn's server on the SAME event loop: an
-        # aiosqlite connection is bound to the loop that created it, so building the
-        # app on a throwaway loop and handing it to uvicorn.run() (which starts its
-        # own loop) would fail at first query.
         store = await SqliteStore.connect(_db_path(args))
-        app = build_app(store, PollingTransport(), token=args.token)
-        config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
-        await uvicorn.Server(config).serve()
+        rest = build_app(store, PollingTransport(), admin_token=args.token)
+        servers = [uvicorn.Server(uvicorn.Config(
+            rest, host=args.host, port=args.port, log_level="info"))]
+        if not args.no_mcp:
+            mcp_port = args.mcp_port or (args.port + 1)
+            mcp_app = build_mcp_app(store, admin_token=args.token)
+            servers.append(uvicorn.Server(uvicorn.Config(
+                mcp_app, host=args.host, port=mcp_port, log_level="info")))
+        # Both servers run on one loop. Suppress each server's own signal capture --
+        # with two servers the last handler installed would win, leaving the other
+        # running forever on SIGINT/SIGTERM -- and drive a single shared shutdown so
+        # a managed process (systemd/container) stops cleanly.
+        for s in servers:
+            s.capture_signals = contextlib.nullcontext
+
+        def _shutdown():
+            for s in servers:
+                s.should_exit = True
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _shutdown)
+        try:
+            await asyncio.gather(*(s.serve() for s in servers))
+        finally:
+            await store.close()
 
     asyncio.run(_run())
 
@@ -83,6 +121,23 @@ async def _join(cfg, room):
         await c.close()
 
 
+async def _token(args):
+    import httpx
+    gw = args.gw or os.environ.get("PARLEY_GW") or "http://127.0.0.1:8790"
+    async with httpx.AsyncClient(base_url=gw) as c:
+        r = await c.post("/admin/agents",
+                         json={"box": args.box, "label": args.label},
+                         headers={"Authorization": f"Bearer {args.admin_token}"})
+        r.raise_for_status()
+        print(r.json()["token"])
+
+
+def _init(args):
+    from parley.cli.init_config import merge_mcp_entry
+    merge_mcp_entry(args.file, name=args.name, url=args.url, token=args.token)
+    print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
+
+
 async def _watch(cfg, room, interval):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
@@ -101,6 +156,12 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "serve":
         _serve(args)
+        return
+    if args.cmd == "token":
+        asyncio.run(_token(args))
+        return
+    if args.cmd == "init":
+        _init(args)
         return
     cfg = resolve_config(args)
     if args.cmd == "say":

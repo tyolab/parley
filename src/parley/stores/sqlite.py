@@ -4,6 +4,7 @@ import datetime
 import aiosqlite
 
 from parley.core.store import self_filter
+from parley.core.tokens import new_token
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -35,6 +36,13 @@ CREATE TABLE IF NOT EXISTS agent_seq (
   n    INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (box, name)
 );
+CREATE TABLE IF NOT EXISTS agent_tokens (
+  token      TEXT PRIMARY KEY,
+  box        TEXT NOT NULL,
+  label      TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agent_tokens_box_idx ON agent_tokens (box);
 """
 
 
@@ -134,6 +142,23 @@ class SqliteStore:
                 "SELECT n FROM agent_seq WHERE box=? AND name=?", (box, slug))
             await self._db.commit()
             return (await cur.fetchone())["n"]
+
+    async def mint_agent_token(self, box, label=None):
+        token = new_token()
+        async with self._wlock:
+            await self._db.execute(
+                "INSERT INTO agent_tokens(token,box,label,created_at) VALUES(?,?,?,?)",
+                (token, box, label, _now()))
+            await self._db.commit()
+        return token
+
+    async def box_for_token(self, token):
+        if not token:
+            return None
+        cur = await self._db.execute(
+            "SELECT box FROM agent_tokens WHERE token=?", (token,))
+        r = await cur.fetchone()
+        return r["box"] if r else None
 
     async def _collect(self, agent_id, room, box, advance, box_view):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
