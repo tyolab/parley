@@ -68,11 +68,19 @@ def _serve(args):
     from parley.gateway.app import build_app
     from parley.mcp.server import build_mcp_app
     from parley.stores.sqlite import SqliteStore
-    from parley.transports.polling import PollingTransport
 
     async def _run():
         store = await SqliteStore.connect(_db_path(args))
-        rest = build_app(store, PollingTransport(), admin_token=args.token)
+        import os
+        from parley.transports.factory import make_transport
+        transport = make_transport(
+            os.environ.get("PARLEY_TRANSPORT", "polling"),
+            host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        rest = build_app(store, transport, admin_token=args.token)
         servers = [uvicorn.Server(uvicorn.Config(
             rest, host=args.host, port=args.port, log_level="info"))]
         if not args.no_mcp:
