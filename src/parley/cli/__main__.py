@@ -61,10 +61,11 @@ def _db_path(args) -> str:
 
 def _serve(args):
     import uvicorn
-    from parley.stores.sqlite import SqliteStore
-    from parley.transports.polling import PollingTransport
+
     from parley.gateway.app import build_app
     from parley.mcp.server import build_mcp_app
+    from parley.stores.sqlite import SqliteStore
+    from parley.transports.polling import PollingTransport
 
     async def _run():
         store = await SqliteStore.connect(_db_path(args))

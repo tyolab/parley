@@ -1,6 +1,7 @@
 import pytest
+
+from parley.mcp.server import _tool_names, build_mcp_app, current_agent_id, current_box
 from parley.stores.sqlite import SqliteStore
-from parley.mcp.server import build_mcp_app, current_agent_id, current_box, _tool_names
 
 
 @pytest.fixture

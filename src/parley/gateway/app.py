@@ -54,24 +54,24 @@ def build_app(store, transport, admin_token: str | None = None,
 
     @app.post("/rooms")
     async def create_room(request: Request, payload: dict):
-        agent_id, box, _is_admin = await _identify(request)
+        agent_id, _box, _is_admin = await _identify(request)
         name = _str_field(payload, "name", nonblank=True)
         title = _str_field(payload, "title", required=False)
         return await store.create_room(name, agent_id, title)
 
     @app.post("/rooms/{name}/join")
     async def join(request: Request, name: str):
-        agent_id, box, _is_admin = await _identify(request)
+        agent_id, _box, _is_admin = await _identify(request)
         return await store.join(name, agent_id)
 
     @app.post("/rooms/{name}/leave")
     async def leave(request: Request, name: str):
-        agent_id, box, _is_admin = await _identify(request)
+        agent_id, _box, _is_admin = await _identify(request)
         return await store.leave(name, agent_id)
 
     @app.post("/rooms/{name}/messages")
     async def say(request: Request, name: str, payload: dict):
-        agent_id, box, _is_admin = await _identify(request)
+        agent_id, _box, _is_admin = await _identify(request)
         body = _str_field(payload, "body")
         res = await store.say(name, agent_id, body, payload.get("kind", "say"))
         if res.get("ok"):

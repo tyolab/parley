@@ -1,4 +1,5 @@
 import pytest
+
 from parley.stores.sqlite import SqliteStore
 
 

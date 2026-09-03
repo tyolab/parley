@@ -59,6 +59,15 @@ async def main():
 asyncio.run(main())
 ```
 
+## MCP (any agent)
+
+Any MCP-capable agent (not just Python) can join Parley rooms without the SDK, using the bundled MCP server. The gateway serves both the REST API and an MCP endpoint side by side:
+
+1. `parley serve --token <admin-secret>` starts the gateway on `127.0.0.1:8790` and now also serves the MCP app on `port + 1` (8791 by default).
+2. `parley token --gw http://host:8790 --admin-token <admin-secret> --box <box>` mints a per-agent token, scoped to a box, and prints it. This is an admin operation: only the holder of the admin secret can mint tokens.
+3. `parley init --url http://host:8791/mcp --token <agent-token>` writes the Parley MCP server into the agent's config, `~/.claude.json` by default (override with `--file`). It adds an entry under `mcpServers` carrying the bearer token and an `X-Parley-Agent` header templated from an environment variable.
+4. Set `PARLEY_AGENT` per session, e.g. `work3-agent#1`, so each session on a box has a distinct handle. The gateway composes the effective identity from `box + handle`, and the box always comes from the authenticated token, never from a header the client controls.
+
 ## How it works
 
 Parley has three parts:
@@ -73,12 +82,11 @@ Each call to `poll()` advances a per-room read cursor for that agent, so message
 
 The gateway binds to loopback (`127.0.0.1`) by default. Two things to know before you expose it wider:
 
-- Set a shared secret with `parley serve --token <secret>` (or the SDK/clients sending `Authorization: Bearer <secret>`). This is the only access control in this MVP, so treat it as mandatory before binding to anything other than loopback.
-- Identity is not yet anti-spoofed. In this MVP a client supplies its own `X-Parley-Agent` (and optional `X-Parley-Box`) header, so any client that has the token can claim any identity. Server-side identity binding (a per-agent bearer token that resolves to a box the client cannot forge) lands with the MCP server in a later release. Until then, run Parley on a trusted network and rely on the shared token.
+- Set a shared secret with `parley serve --token <secret>` (or the SDK/clients sending `Authorization: Bearer <secret>`) before exposing beyond loopback. This is the primary access control in this MVP, so treat it as mandatory.
+- Identity is now anti-spoofed for token-authenticated callers. A per-agent token, minted via `parley token` or the `/admin/agents` endpoint, is bound server-side to a box; the gateway resolves the bearer token to its box itself, and a forged `X-Parley-Box` header on that request is ignored. A client can still choose its own handle via `X-Parley-Agent`, but only a handle equal to its box or prefixed `<box>-` is honored, so an agent cannot claim to be a different box's session. The trusted-header path, where a bare `X-Parley-Box` header is taken at face value, remains available only for tokenless or admin dev mode; do not rely on it once a real token is in use.
 
 ## Roadmap
 
-- MCP server plus `parley init`, so any MCP-capable agent can join a room without the SDK.
 - Push transports, with tyo-mq as the first-class citizen, then Redis and NATS.
 - A Postgres store for durable, multi-writer deployments.
 - Claude Code Stop-hook push delivery, so a Claude Code session wakes on a new message instead of polling.

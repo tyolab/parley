@@ -1,6 +1,7 @@
 import pytest
-from parley.stores.sqlite import SqliteStore
+
 from parley.gateway.identity import resolve_identity
+from parley.stores.sqlite import SqliteStore
 
 
 @pytest.fixture
