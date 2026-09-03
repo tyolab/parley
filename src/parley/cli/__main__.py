@@ -74,11 +74,14 @@ def _serve(args):
 
     from parley.gateway.app import build_app
     from parley.mcp.server import build_mcp_app
-    from parley.stores.sqlite import SqliteStore
 
     async def _run():
-        store = await SqliteStore.connect(_db_path(args))
         import os
+
+        from parley.stores.factory import is_pg_dsn, make_store
+        db = os.environ.get("PARLEY_DB")
+        location = db if is_pg_dsn(db) else _db_path(args)
+        store = await make_store(location, schema=os.environ.get("PARLEY_PG_SCHEMA", "parley"))
 
         from parley.transports.factory import make_transport
         transport = make_transport(
