@@ -13,6 +13,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8790)
     s.add_argument("--db", default=None)
     s.add_argument("--token", default=None)
+    s.add_argument("--mcp-port", type=int, default=None)
+    s.add_argument("--no-mcp", action="store_true")
 
     for name, help_ in [("join", "join a room"), ("watch", "watch/participate in rooms")]:
         c = sub.add_parser(name, help=help_)
@@ -27,6 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("text")
     sy.add_argument("--gw", default=None)
     sy.add_argument("--agent", default=None)
+
+    tk = sub.add_parser("token", help="mint a per-agent token (admin)")
+    tk.add_argument("--gw", default=None)
+    tk.add_argument("--admin-token", required=True)
+    tk.add_argument("--box", required=True)
+    tk.add_argument("--label", default=None)
     return p
 
 
@@ -47,20 +55,22 @@ def _db_path(args) -> str:
 
 def _serve(args):
     import uvicorn
-
-    from parley.gateway.app import build_app
     from parley.stores.sqlite import SqliteStore
     from parley.transports.polling import PollingTransport
+    from parley.gateway.app import build_app
+    from parley.mcp.server import build_mcp_app
 
     async def _run():
-        # Connect the store and run uvicorn's server on the SAME event loop: an
-        # aiosqlite connection is bound to the loop that created it, so building the
-        # app on a throwaway loop and handing it to uvicorn.run() (which starts its
-        # own loop) would fail at first query.
         store = await SqliteStore.connect(_db_path(args))
-        app = build_app(store, PollingTransport(), token=args.token)
-        config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
-        await uvicorn.Server(config).serve()
+        rest = build_app(store, PollingTransport(), admin_token=args.token)
+        servers = [uvicorn.Server(uvicorn.Config(
+            rest, host=args.host, port=args.port, log_level="info"))]
+        if not args.no_mcp:
+            mcp_port = args.mcp_port or (args.port + 1)
+            mcp_app = build_mcp_app(store, admin_token=args.token)
+            servers.append(uvicorn.Server(uvicorn.Config(
+                mcp_app, host=args.host, port=mcp_port, log_level="info")))
+        await asyncio.gather(*(s.serve() for s in servers))
 
     asyncio.run(_run())
 
@@ -83,6 +93,17 @@ async def _join(cfg, room):
         await c.close()
 
 
+async def _token(args):
+    import httpx
+    gw = args.gw or os.environ.get("PARLEY_GW") or "http://127.0.0.1:8790"
+    async with httpx.AsyncClient(base_url=gw) as c:
+        r = await c.post("/admin/agents",
+                         json={"box": args.box, "label": args.label},
+                         headers={"Authorization": f"Bearer {args.admin_token}"})
+        r.raise_for_status()
+        print(r.json()["token"])
+
+
 async def _watch(cfg, room, interval):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
@@ -101,6 +122,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "serve":
         _serve(args)
+        return
+    if args.cmd == "token":
+        asyncio.run(_token(args))
         return
     cfg = resolve_config(args)
     if args.cmd == "say":
