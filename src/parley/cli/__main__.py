@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("--agent", default=None)
         if name == "watch":
             c.add_argument("--interval", type=float, default=2.0)
+            c.add_argument("--push", action="store_true")
 
     sy = sub.add_parser("say", help="post one message")
     sy.add_argument("room")
@@ -146,15 +147,42 @@ def _init(args):
     print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
 
 
-async def _watch(cfg, room, interval):
+async def _watch(cfg, room, interval, push=False):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
+
+    async def _drain():
+        for conv in await c.poll(room):
+            for m in conv["messages"]:
+                print(f"[{conv['conv']}] {m['from']}: {m['body']}")
+
+    if push and room:
+        import os
+        from parley.transports.factory import make_transport
+        transport = make_transport(
+            os.environ.get("PARLEY_TRANSPORT", "polling"),
+            host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        print(f"[parley] watching {room} as {cfg['agent']} (push; Ctrl-C to stop)")
+        await _drain()  # catch up on anything already waiting
+        subs = await c.listen(transport, [room], lambda sig: _drain())
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            for s in subs:
+                await s.close()
+            await transport.close()
+            await c.close()
+        return
+
     print(f"[parley] watching as {cfg['agent']} (Ctrl-C to stop)")
     try:
         while True:
-            for conv in await c.poll(room):
-                for m in conv["messages"]:
-                    print(f"[{conv['conv']}] {m['from']}: {m['body']}")
+            await _drain()
             await asyncio.sleep(interval)
     finally:
         await c.close()
@@ -178,7 +206,7 @@ def main(argv=None):
         asyncio.run(_join(cfg, args.room))
     elif args.cmd == "watch":
         try:
-            asyncio.run(_watch(cfg, args.room, args.interval))
+            asyncio.run(_watch(cfg, args.room, args.interval, getattr(args, "push", False)))
         except KeyboardInterrupt:
             print("\n[parley] stopped")
 
