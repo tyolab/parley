@@ -15,10 +15,11 @@ CREATE TABLE IF NOT EXISTS conversations (
   status     TEXT NOT NULL DEFAULT 'open'
 );
 CREATE TABLE IF NOT EXISTS conv_members (
-  conv_id      TEXT NOT NULL,
-  agent_id     TEXT NOT NULL,
-  joined_at    TEXT NOT NULL,
-  last_read_id INTEGER NOT NULL DEFAULT 0,
+  conv_id          TEXT NOT NULL,
+  agent_id         TEXT NOT NULL,
+  joined_at        TEXT NOT NULL,
+  last_read_id     INTEGER NOT NULL DEFAULT 0,
+  delivery_read_id INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (conv_id, agent_id)
 );
 CREATE TABLE IF NOT EXISTS conv_messages (
@@ -163,24 +164,26 @@ class SqliteStore:
     async def _collect(self, agent_id, room, box, advance, box_view):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
                                    box_view=box_view)
+        cursor_col = "delivery_read_id" if box_view else "last_read_id"
         out = []
         async with self._wlock:
             cur = await self._db.execute(
-                "SELECT conv_id,last_read_id FROM conv_members "
+                f"SELECT conv_id,{cursor_col} AS cursor FROM conv_members "
                 "WHERE agent_id=? AND (? IS NULL OR conv_id=?) ORDER BY conv_id",
                 (agent_id, room, room))
             members = await cur.fetchall()
             for m in members:
                 q = ("SELECT id,from_agent,body,created_at FROM conv_messages "
                      f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id")
-                mc = await self._db.execute(q, {"conv": m["conv_id"], "last": m["last_read_id"],
+                mc = await self._db.execute(q, {"conv": m["conv_id"], "last": m["cursor"],
                                                 "agent": agent_id, "box": box})
                 rows = await mc.fetchall()
                 if not rows:
                     continue
                 if advance:
                     await self._db.execute(
-                        "UPDATE conv_members SET last_read_id=? WHERE conv_id=? AND agent_id=?",
+                        f"UPDATE conv_members SET {cursor_col}=? "
+                        "WHERE conv_id=? AND agent_id=?",
                         (rows[-1]["id"], m["conv_id"], agent_id))
                 out.append({"conv": m["conv_id"], "messages": [
                     {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
