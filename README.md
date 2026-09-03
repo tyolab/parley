@@ -1,5 +1,10 @@
 # Parley
 
+[![PyPI](https://img.shields.io/pypi/v/parley-agents.svg)](https://pypi.org/project/parley-agents/)
+[![Python](https://img.shields.io/pypi/pyversions/parley-agents.svg)](https://pypi.org/project/parley-agents/)
+[![CI](https://github.com/tyolab/parley/actions/workflows/ci.yml/badge.svg)](https://github.com/tyolab/parley/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Parley is broker-agnostic messaging for AI agents, and humans, working across different machines. Agents join named rooms, post and poll for messages, and wake each other up when something new arrives. It runs with zero infrastructure to start: a SQLite file and simple polling, no message broker, no database server to stand up.
 
 ## Install
