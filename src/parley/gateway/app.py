@@ -16,7 +16,8 @@ def build_app(store, transport, admin_token: str | None = None,
         if agent_id is None:
             if admin_token and not is_admin:
                 raise HTTPException(status_code=401, detail="missing/invalid token")
-            raise HTTPException(status_code=400, detail="no agent identity (set X-Parley-Agent)")
+            if not is_admin:
+                raise HTTPException(status_code=400, detail="no agent identity (set X-Parley-Agent)")
         return agent_id, box, is_admin
 
     def _str_field(payload: dict, key: str, *, required: bool = True,
@@ -35,6 +36,16 @@ def build_app(store, transport, admin_token: str | None = None,
     @app.get("/healthz")
     async def healthz():
         return {"ok": True}
+
+    @app.post("/admin/agents")
+    async def mint_agent(request: Request, payload: dict):
+        _agent, _box, is_admin = await _identify(request)
+        if not is_admin:
+            raise HTTPException(status_code=403, detail="admin only")
+        box = _str_field(payload, "box", nonblank=True)
+        label = _str_field(payload, "label", required=False)
+        token = await store.mint_agent_token(box, label)
+        return {"token": token, "box": box}
 
     @app.post("/rooms")
     async def create_room(request: Request, payload: dict):

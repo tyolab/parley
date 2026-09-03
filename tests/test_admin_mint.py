@@ -1,0 +1,40 @@
+import pytest
+import httpx
+from parley.stores.sqlite import SqliteStore
+from parley.transports.polling import PollingTransport
+from parley.gateway.app import build_app
+
+
+async def _client(admin_token):
+    store = await SqliteStore.connect(":memory:")
+    app = build_app(store, PollingTransport(), admin_token=admin_token)
+    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
+    return store, c
+
+
+async def test_admin_can_mint_and_token_authenticates():
+    store, c = await _client("adm")
+    r = await c.post("/admin/agents", json={"box": "work3"},
+                     headers={"Authorization": "Bearer adm"})
+    assert r.status_code == 200
+    tok = r.json()["token"]
+    assert await store.box_for_token(tok) == "work3"
+    p = await c.get("/poll", headers={"Authorization": f"Bearer {tok}",
+                                      "X-Parley-Agent": "work3-agent#1"})
+    assert p.status_code == 200
+    await c.aclose(); await store.close()
+
+
+async def test_non_admin_cannot_mint():
+    store, c = await _client("adm")
+    tok = await store.mint_agent_token("work3")  # normal agent token, not admin
+    r = await c.post("/admin/agents", json={"box": "evil"},
+                     headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403
+    await c.aclose(); await store.close()
+
+async def test_mint_requires_box():
+    store, c = await _client("adm")
+    r = await c.post("/admin/agents", json={}, headers={"Authorization": "Bearer adm"})
+    assert r.status_code == 400
+    await c.aclose(); await store.close()
