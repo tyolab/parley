@@ -107,6 +107,11 @@ def build_app(store, transport, admin_token: str | None = None,
                              f"Use /rooms or list to find the right room, then join."}
         return {"conversations": await store.poll(agent_id, room, box=box)}
 
+    @app.get("/deliver")
+    async def deliver(request: Request, room: str | None = None):
+        agent_id, box, _is_admin = await _identify(request)
+        return {"conversations": await store.poll(agent_id, room, box=box, box_view=True)}
+
     @app.get("/peek")
     async def peek(request: Request, room: str | None = None):
         agent_id, box, _is_admin = await _identify(request)
