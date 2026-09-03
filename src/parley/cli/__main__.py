@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("--agent", default=None)
         if name == "watch":
             c.add_argument("--interval", type=float, default=2.0)
+            c.add_argument("--push", action="store_true")
 
     sy = sub.add_parser("say", help="post one message")
     sy.add_argument("room")
@@ -41,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     ini.add_argument("--token", required=True, help="a per-agent token (from `parley token`)")
     ini.add_argument("--name", default="parley")
     ini.add_argument("--file", default=os.path.expanduser("~/.claude.json"))
+
+    nt = sub.add_parser("notify", help="run the idle-wake notifier daemon")
+    nt.add_argument("--room", action="append", required=True, help="room to watch (repeatable)")
+    nt.add_argument("--wake-cmd", required=True, help="command template, {box}/{room}/{from}")
+    nt.add_argument("--box", default="")
+    nt.add_argument("--debounce", type=float, default=0.5)
     return p
 
 
@@ -68,11 +75,20 @@ def _serve(args):
     from parley.gateway.app import build_app
     from parley.mcp.server import build_mcp_app
     from parley.stores.sqlite import SqliteStore
-    from parley.transports.polling import PollingTransport
 
     async def _run():
         store = await SqliteStore.connect(_db_path(args))
-        rest = build_app(store, PollingTransport(), admin_token=args.token)
+        import os
+
+        from parley.transports.factory import make_transport
+        transport = make_transport(
+            os.environ.get("PARLEY_TRANSPORT", "polling"),
+            host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        rest = build_app(store, transport, admin_token=args.token)
         servers = [uvicorn.Server(uvicorn.Config(
             rest, host=args.host, port=args.port, log_level="info"))]
         if not args.no_mcp:
@@ -138,15 +154,75 @@ def _init(args):
     print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
 
 
-async def _watch(cfg, room, interval):
+def _notify(args):
+    import os
+
+    from parley.notify.daemon import Notifier
+    from parley.transports.factory import make_transport
+
+    async def _run():
+        # Build the transport INSIDE the running loop: a thread-bridged adapter
+        # (tyo-mq) captures the running loop at construction, so constructing it
+        # before asyncio.run() would bind a dead loop and the wake would never fire.
+        kind = os.environ.get("PARLEY_TRANSPORT", "polling")
+        transport = make_transport(
+            kind, host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        n = Notifier(transport, rooms=args.room, wake_cmd=args.wake_cmd, box=args.box,
+                     debounce_s=args.debounce)
+        await n.start()
+        print(f"[parley notify] watching {args.room} (Ctrl-C to stop)")
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await n.stop()
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        print("\n[parley notify] stopped")
+
+
+async def _watch(cfg, room, interval, push=False):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
+
+    async def _drain():
+        for conv in await c.poll(room):
+            for m in conv["messages"]:
+                print(f"[{conv['conv']}] {m['from']}: {m['body']}")
+
+    if push and room:
+        import os
+
+        from parley.transports.factory import make_transport
+        transport = make_transport(
+            os.environ.get("PARLEY_TRANSPORT", "polling"),
+            host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        print(f"[parley] watching {room} as {cfg['agent']} (push; Ctrl-C to stop)")
+        await _drain()  # catch up on anything already waiting
+        subs = await c.listen(transport, [room], lambda sig: _drain())
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            for s in subs:
+                await s.close()
+            await transport.close()
+            await c.close()
+        return
+
     print(f"[parley] watching as {cfg['agent']} (Ctrl-C to stop)")
     try:
         while True:
-            for conv in await c.poll(room):
-                for m in conv["messages"]:
-                    print(f"[{conv['conv']}] {m['from']}: {m['body']}")
+            await _drain()
             await asyncio.sleep(interval)
     finally:
         await c.close()
@@ -163,6 +239,9 @@ def main(argv=None):
     if args.cmd == "init":
         _init(args)
         return
+    if args.cmd == "notify":
+        _notify(args)
+        return
     cfg = resolve_config(args)
     if args.cmd == "say":
         asyncio.run(_say(cfg, args.room, args.text))
@@ -170,7 +249,7 @@ def main(argv=None):
         asyncio.run(_join(cfg, args.room))
     elif args.cmd == "watch":
         try:
-            asyncio.run(_watch(cfg, args.room, args.interval))
+            asyncio.run(_watch(cfg, args.room, args.interval, getattr(args, "push", False)))
         except KeyboardInterrupt:
             print("\n[parley] stopped")
 

@@ -43,6 +43,20 @@ class Client:
         params = {"room": room} if room else None
         return (await self._http.get("/peek", params=params)).json()["conversations"]
 
+    async def deliver(self, room: str | None = None) -> list[dict]:
+        """Catch-all delivery poll (box_view). Used by the Stop-hook / notifier."""
+        params = {"room": room} if room else None
+        return (await self._http.get("/deliver", params=params)).json()["conversations"]
+
+    async def listen(self, transport, rooms, on_nudge):
+        """Subscribe to each room's nudge topic; call on_nudge(signal) per nudge.
+        Returns the list of subscriptions (close each to stop). Works with any
+        Transport (FakeTransport in tests; tyo-mq/redis/nats in production)."""
+        subs = []
+        for room in rooms:
+            subs.append(await transport.subscribe(room, on_nudge))
+        return subs
+
     async def list_rooms(self) -> list[dict]:
         return (await self._http.get("/rooms")).json()["conversations"]
 
