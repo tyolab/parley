@@ -1,6 +1,6 @@
 import asyncpg
 
-from parley.core.store import self_filter  # noqa: F401 - reserved for poll/peek in Task 2
+from parley.core.store import self_filter
 from parley.core.tokens import new_token
 
 _SCHEMA_DDL = """
@@ -145,17 +145,64 @@ class PostgresStore:
         async with self._pool.acquire() as c:
             return await c.fetchval("SELECT box FROM agent_tokens WHERE token=$1", token)
 
+    async def _collect(self, agent_id, room, box, advance, box_view):
+        # box_view reuses $3 (agent) in the predicate exactly like board._self_filter;
+        # extra is empty and $4 is never referenced.
+        pred, _extra = self_filter(agent_id, box, "from_agent", "$3", "$4", box_view=box_view)
+        cursor_col = "delivery_read_id" if box_view else "last_read_id"
+        out = []
+        async with self._pool.acquire() as c, c.transaction():
+            members = await c.fetch(
+                f"SELECT conv_id,{cursor_col} AS cursor FROM conv_members "
+                "WHERE agent_id=$1 AND ($2::text IS NULL OR conv_id=$2) "
+                "ORDER BY conv_id FOR UPDATE", agent_id, room)
+            for m in members:
+                rows = await c.fetch(
+                    "SELECT id,from_agent,body,created_at FROM conv_messages "
+                    f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id",
+                    m["conv_id"], m["cursor"], agent_id)
+                if not rows:
+                    continue
+                if advance:
+                    await c.execute(
+                        f"UPDATE conv_members SET {cursor_col}=$3 "
+                        "WHERE conv_id=$1 AND agent_id=$2",
+                        m["conv_id"], agent_id, rows[-1]["id"])
+                out.append({"conv": m["conv_id"], "messages": [
+                    {"from": r["from_agent"], "body": r["body"],
+                     "at": _iso(r["created_at"])} for r in rows]})
+        return out
+
     async def poll(self, agent_id, room=None, box=None, box_view=False):
-        raise NotImplementedError("Task 2")
+        return await self._collect(agent_id, room, box, advance=True, box_view=box_view)
 
     async def peek(self, agent_id, room=None, box=None, box_view=False):
-        raise NotImplementedError("Task 2")
+        return await self._collect(agent_id, room, box, advance=False, box_view=box_view)
 
     async def list_rooms(self, agent_id, box=None):
-        raise NotImplementedError("Task 2")
+        pred, _extra = self_filter(agent_id, box, "x.from_agent", "$1", "$2")
+        async with self._pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT m.conv_id AS conv, "
+                "(SELECT count(*) FROM conv_messages x WHERE x.conv_id=m.conv_id "
+                f" AND x.id>m.last_read_id AND {pred}) AS unread "
+                "FROM conv_members m WHERE m.agent_id=$1 ORDER BY m.conv_id", agent_id)
+        return [{"conv": r["conv"], "unread": int(r["unread"])} for r in rows]
 
     async def all_rooms(self):
-        raise NotImplementedError("Task 2")
+        async with self._pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT cm.conv_id AS conv, count(*) AS members, "
+                "(SELECT count(*) FROM conv_messages x WHERE x.conv_id=cm.conv_id) AS messages, "
+                "co.title AS title "
+                "FROM conv_members cm LEFT JOIN conversations co ON co.id=cm.conv_id "
+                "GROUP BY cm.conv_id, co.title ORDER BY cm.conv_id")
+        return [{"conv": r["conv"], "members": int(r["members"]),
+                 "messages": int(r["messages"]), "title": r["title"]} for r in rows]
 
     async def box_rooms(self, box):
-        raise NotImplementedError("Task 2")
+        async with self._pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT DISTINCT conv_id FROM conv_members "
+                "WHERE agent_id=$1 OR agent_id LIKE $1 || '-%' ORDER BY conv_id", box)
+        return [r["conv_id"] for r in rows]
