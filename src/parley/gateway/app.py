@@ -20,6 +20,21 @@ def build_app(store, transport, token: str | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="no agent identity (set X-Parley-Agent)")
         return agent_id, box
 
+    def _str_field(payload: dict, key: str, *, required: bool = True,
+                   nonblank: bool = False) -> str | None:
+        """Pull a string field from a JSON body, returning HTTP 400 (not an
+        unhandled 500) on a missing/blank/wrong-typed value."""
+        val = payload.get(key)
+        if val is None:
+            if required:
+                raise HTTPException(status_code=400, detail=f"missing '{key}'")
+            return None
+        if not isinstance(val, str):
+            raise HTTPException(status_code=400, detail=f"'{key}' must be a string")
+        if nonblank and not val.strip():
+            raise HTTPException(status_code=400, detail=f"'{key}' must not be blank")
+        return val
+
     @app.get("/healthz")
     async def healthz():
         return {"ok": True}
@@ -27,7 +42,9 @@ def build_app(store, transport, token: str | None = None) -> FastAPI:
     @app.post("/rooms")
     async def create_room(request: Request, payload: dict):
         _auth(request); agent_id, _ = _ident(request)
-        return await store.create_room(payload["name"], agent_id, payload.get("title"))
+        name = _str_field(payload, "name", nonblank=True)
+        title = _str_field(payload, "title", required=False)
+        return await store.create_room(name, agent_id, title)
 
     @app.post("/rooms/{name}/join")
     async def join(request: Request, name: str):
@@ -42,7 +59,8 @@ def build_app(store, transport, token: str | None = None) -> FastAPI:
     @app.post("/rooms/{name}/messages")
     async def say(request: Request, name: str, payload: dict):
         _auth(request); agent_id, _ = _ident(request)
-        res = await store.say(name, agent_id, payload["body"], payload.get("kind", "say"))
+        body = _str_field(payload, "body")
+        res = await store.say(name, agent_id, body, payload.get("kind", "say"))
         if res.get("ok"):
             at = datetime.datetime.now(datetime.UTC).isoformat()
             try:

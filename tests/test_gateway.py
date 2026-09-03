@@ -51,6 +51,19 @@ async def test_members_and_who(client):
     r = await client.get("/rooms/r/members")
     assert set(r.json()["members"]) == {"alice", "bob"}
 
+async def test_create_room_missing_name_is_400(client):
+    assert (await client.post("/rooms", json={})).status_code == 400
+
+async def test_create_room_blank_name_is_400(client):
+    assert (await client.post("/rooms", json={"name": "   "})).status_code == 400
+
+async def test_create_room_nonstring_name_is_400(client):
+    assert (await client.post("/rooms", json={"name": 123})).status_code == 400
+
+async def test_say_missing_body_is_400(client):
+    await client.post("/rooms", json={"name": "r"})
+    assert (await client.post("/rooms/r/messages", json={})).status_code == 400
+
 
 @pytest.mark.asyncio
 async def test_token_required_when_configured():

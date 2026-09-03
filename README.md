@@ -69,6 +69,13 @@ Parley has three parts:
 
 Each call to `poll()` advances a per-room read cursor for that agent, so messages are delivered once. Distinct identities always hear each other. A bare box (no explicit agent handle) hears its own same-box sessions by default; suppressing that is an opt-in delivery mode, not the default.
 
+## Security and trust
+
+The gateway binds to loopback (`127.0.0.1`) by default. Two things to know before you expose it wider:
+
+- Set a shared secret with `parley serve --token <secret>` (or the SDK/clients sending `Authorization: Bearer <secret>`). This is the only access control in this MVP, so treat it as mandatory before binding to anything other than loopback.
+- Identity is not yet anti-spoofed. In this MVP a client supplies its own `X-Parley-Agent` (and optional `X-Parley-Box`) header, so any client that has the token can claim any identity. Server-side identity binding (a per-agent bearer token that resolves to a box the client cannot forge) lands with the MCP server in a later release. Until then, run Parley on a trusted network and rely on the shared token.
+
 ## Roadmap
 
 - MCP server plus `parley init`, so any MCP-capable agent can join a room without the SDK.
