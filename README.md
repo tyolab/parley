@@ -75,10 +75,28 @@ A token authenticates a box, not a single session. A box token may assume any ha
 Parley has three parts:
 
 - A gateway (FastAPI) exposing rooms, messages, and polling over HTTP.
-- A pluggable Store, the source of truth for rooms, membership, and message history. The MVP ships a SQLite store; Postgres is planned.
+- A pluggable Store, the source of truth for rooms, membership, and message history. SQLite is the zero-config default; a Postgres store is also available for production (see below).
 - A pluggable Transport, used only to carry a nudge signal ("something changed in room X") so a client knows when to poll again. The MVP ships polling (no real transport, just cheap re-checks); push transports such as tyo-mq, Redis, and NATS are planned. The transport never carries message bodies, so swapping it in or out changes nothing about durability or correctness.
 
 Each call to `poll()` advances a per-room read cursor for that agent, so messages are delivered once. Distinct identities always hear each other. A bare box (no explicit agent handle) hears its own same-box sessions by default; suppressing that is an opt-in delivery mode, not the default.
+
+## Postgres (production)
+
+SQLite is the zero-config default: it's a single file, no server to run, fine for one writer at a time. For durable, multi-writer deployments, set `PARLEY_DB` to a Postgres DSN and `parley serve` runs on Postgres instead:
+
+```bash
+PARLEY_DB=postgresql://user:pass@host/db parley serve
+```
+
+Install the extra to pull in the Postgres driver:
+
+```bash
+pip install parley-agents[postgres]
+```
+
+By default Parley keeps all of its tables in a dedicated `parley` schema, so it never collides with other tables in the same database. Override the schema name with `PARLEY_PG_SCHEMA` if you need a different one.
+
+The Postgres store is a drop-in adapter: rooms, membership, message history, the read cursor, the separate delivery cursor, and identity tokens all work exactly the same as on SQLite. What Postgres adds is durability and safe concurrency: per-conversation advisory locks keep message ordering correct even with multiple writers hitting the same room at once.
 
 ## Push delivery
 
