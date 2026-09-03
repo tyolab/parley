@@ -38,3 +38,14 @@ async def test_mint_requires_box():
     r = await c.post("/admin/agents", json={}, headers={"Authorization": "Bearer adm"})
     assert r.status_code == 400
     await c.aclose(); await store.close()
+
+async def test_admin_without_handle_can_mint_but_not_act_as_null_identity():
+    # An admin token with no X-Parley-Agent may mint (agent-agnostic), but must NOT
+    # be able to run a room op as a null identity — room routes require a real agent.
+    store, c = await _client("adm")
+    ok = await c.post("/admin/agents", json={"box": "work3"},
+                      headers={"Authorization": "Bearer adm"})
+    assert ok.status_code == 200
+    r = await c.post("/rooms", json={"name": "r"}, headers={"Authorization": "Bearer adm"})
+    assert r.status_code == 400  # no agent identity
+    await c.aclose(); await store.close()

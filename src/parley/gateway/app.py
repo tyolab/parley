@@ -16,8 +16,10 @@ def build_app(store, transport, admin_token: str | None = None,
         if agent_id is None:
             if admin_token and not is_admin:
                 raise HTTPException(status_code=401, detail="missing/invalid token")
-            if not is_admin:
-                raise HTTPException(status_code=400, detail="no agent identity (set X-Parley-Agent)")
+            # Room operations always need a concrete agent identity, even for an admin
+            # caller. Admin-only, agent-agnostic endpoints (e.g. minting) resolve
+            # identity themselves and must NOT go through _identify.
+            raise HTTPException(status_code=400, detail="no agent identity (set X-Parley-Agent)")
         return agent_id, box, is_admin
 
     def _str_field(payload: dict, key: str, *, required: bool = True,
@@ -39,7 +41,10 @@ def build_app(store, transport, admin_token: str | None = None,
 
     @app.post("/admin/agents")
     async def mint_agent(request: Request, payload: dict):
-        _agent, _box, is_admin = await _identify(request)
+        # Minting is admin-only but agent-agnostic: resolve identity directly (an
+        # admin caller need not carry an X-Parley-Agent handle) rather than via
+        # _identify, which requires a concrete agent identity.
+        _aid, _box, is_admin = await resolve_identity(store, request.headers, admin_token)
         if not is_admin:
             raise HTTPException(status_code=403, detail="admin only")
         box = _str_field(payload, "box", nonblank=True)
