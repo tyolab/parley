@@ -42,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     ini.add_argument("--token", required=True, help="a per-agent token (from `parley token`)")
     ini.add_argument("--name", default="parley")
     ini.add_argument("--file", default=os.path.expanduser("~/.claude.json"))
+
+    nt = sub.add_parser("notify", help="run the idle-wake notifier daemon")
+    nt.add_argument("--room", action="append", required=True, help="room to watch (repeatable)")
+    nt.add_argument("--wake-cmd", required=True, help="command template, {box}/{room}/{from}")
+    nt.add_argument("--box", default="")
+    nt.add_argument("--debounce", type=float, default=0.5)
     return p
 
 
@@ -147,6 +153,32 @@ def _init(args):
     print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
 
 
+def _notify(args):
+    import os
+    from parley.transports.factory import make_transport
+    from parley.notify.daemon import Notifier
+    kind = os.environ.get("PARLEY_TRANSPORT", "polling")
+    transport = make_transport(kind, host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+                               port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+                               token=os.environ.get("MQ_TOKEN"),
+                               url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+                               servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+    n = Notifier(transport, rooms=args.room, wake_cmd=args.wake_cmd, box=args.box,
+                 debounce_s=args.debounce)
+    async def _run():
+        await n.start()
+        print(f"[parley notify] watching {args.room} (Ctrl-C to stop)")
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await n.stop()
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        print("\n[parley notify] stopped")
+
+
 async def _watch(cfg, room, interval, push=False):
     from parley.client import Client
     c = Client(base_url=cfg["gw"], agent=cfg["agent"])
@@ -198,6 +230,9 @@ def main(argv=None):
         return
     if args.cmd == "init":
         _init(args)
+        return
+    if args.cmd == "notify":
+        _notify(args)
         return
     cfg = resolve_config(args)
     if args.cmd == "say":
