@@ -170,10 +170,27 @@ class SqliteStore:
         return await self._collect(agent_id, room, box, advance=False, box_view=box_view)
 
     async def list_rooms(self, agent_id, box=None):
-        raise NotImplementedError("Task 5")
+        pred, _extra = self_filter(agent_id, box, "x.from_agent", ":agent", ":box")
+        q = ("SELECT m.conv_id AS conv, "
+             "(SELECT count(*) FROM conv_messages x WHERE x.conv_id=m.conv_id "
+             f" AND x.id>m.last_read_id AND {pred}) AS unread "
+             "FROM conv_members m WHERE m.agent_id=:agent ORDER BY m.conv_id")
+        cur = await self._db.execute(q, {"agent": agent_id, "box": box})
+        return [{"conv": r["conv"], "unread": int(r["unread"])} for r in await cur.fetchall()]
 
     async def all_rooms(self):
-        raise NotImplementedError("Task 5")
+        q = ("SELECT cm.conv_id AS conv, count(*) AS members, "
+             "(SELECT count(*) FROM conv_messages x WHERE x.conv_id=cm.conv_id) AS messages, "
+             "co.title AS title "
+             "FROM conv_members cm LEFT JOIN conversations co ON co.id=cm.conv_id "
+             "GROUP BY cm.conv_id, co.title ORDER BY cm.conv_id")
+        cur = await self._db.execute(q)
+        return [{"conv": r["conv"], "members": int(r["members"]),
+                 "messages": int(r["messages"]), "title": r["title"]}
+                for r in await cur.fetchall()]
 
     async def box_rooms(self, box):
-        raise NotImplementedError("Task 5")
+        cur = await self._db.execute(
+            "SELECT DISTINCT conv_id FROM conv_members "
+            "WHERE agent_id=? OR agent_id LIKE ? || '-%' ORDER BY conv_id", (box, box))
+        return [r["conv_id"] for r in await cur.fetchall()]
