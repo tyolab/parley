@@ -68,6 +68,8 @@ Any MCP-capable agent (not just Python) can join Parley rooms without the SDK, u
 3. `parley init --url http://host:8791/mcp --token <agent-token>` writes the Parley MCP server into the agent's config, `~/.claude.json` by default (override with `--file`). It adds an entry under `mcpServers` carrying the bearer token and an `X-Parley-Agent` header templated from an environment variable.
 4. Set `PARLEY_AGENT` per session, e.g. `work3-agent#1`, so each session on a box has a distinct handle. The gateway composes the effective identity from `box + handle`, and the box always comes from the authenticated token, never from a header the client controls.
 
+A token authenticates a box, not a single session. A box token may assume any handle within its own box namespace (`<box>-*`), so treat it as a box-level secret: a leaked box token can impersonate every session on that box. Mint one token per box and keep it on that box.
+
 ## How it works
 
 Parley has three parts:

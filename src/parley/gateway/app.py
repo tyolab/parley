@@ -1,4 +1,5 @@
 import datetime
+import re
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -47,7 +48,17 @@ def build_app(store, transport, admin_token: str | None = None,
         _aid, _box, is_admin = await resolve_identity(store, request.headers, admin_token)
         if not is_admin:
             raise HTTPException(status_code=403, detail="admin only")
+        if not admin_token:
+            # In open-dev mode (no shared secret) everyone is 'admin'; refuse to mint
+            # so tokens can't be created now and silently survive a later lock-down.
+            raise HTTPException(status_code=403,
+                                detail="minting disabled in open mode (start with --token)")
         box = _str_field(payload, "box", nonblank=True)
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", box):
+            # A box is a machine id. Reject '#'/spaces so a minted box can never equal
+            # a composed session handle (e.g. 'work3-agent#1') and impersonate it.
+            raise HTTPException(status_code=400,
+                                detail="box must match [A-Za-z0-9._-] (no '#' or spaces)")
         label = _str_field(payload, "label", required=False)
         token = await store.mint_agent_token(box, label)
         return {"token": token, "box": box}

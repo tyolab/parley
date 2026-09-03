@@ -60,6 +60,9 @@ def _db_path(args) -> str:
 
 
 def _serve(args):
+    import contextlib
+    import signal
+
     import uvicorn
 
     from parley.gateway.app import build_app
@@ -77,7 +80,25 @@ def _serve(args):
             mcp_app = build_mcp_app(store, admin_token=args.token)
             servers.append(uvicorn.Server(uvicorn.Config(
                 mcp_app, host=args.host, port=mcp_port, log_level="info")))
-        await asyncio.gather(*(s.serve() for s in servers))
+        # Both servers run on one loop. Suppress each server's own signal capture --
+        # with two servers the last handler installed would win, leaving the other
+        # running forever on SIGINT/SIGTERM -- and drive a single shared shutdown so
+        # a managed process (systemd/container) stops cleanly.
+        for s in servers:
+            s.capture_signals = contextlib.nullcontext
+
+        def _shutdown():
+            for s in servers:
+                s.should_exit = True
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _shutdown)
+        try:
+            await asyncio.gather(*(s.serve() for s in servers))
+        finally:
+            await store.close()
 
     asyncio.run(_run())
 
