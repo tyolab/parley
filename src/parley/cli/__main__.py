@@ -159,15 +159,20 @@ def _notify(args):
 
     from parley.notify.daemon import Notifier
     from parley.transports.factory import make_transport
-    kind = os.environ.get("PARLEY_TRANSPORT", "polling")
-    transport = make_transport(kind, host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
-                               port=os.environ.get("PARLEY_MQ_PORT", "17352"),
-                               token=os.environ.get("MQ_TOKEN"),
-                               url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
-                               servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
-    n = Notifier(transport, rooms=args.room, wake_cmd=args.wake_cmd, box=args.box,
-                 debounce_s=args.debounce)
+
     async def _run():
+        # Build the transport INSIDE the running loop: a thread-bridged adapter
+        # (tyo-mq) captures the running loop at construction, so constructing it
+        # before asyncio.run() would bind a dead loop and the wake would never fire.
+        kind = os.environ.get("PARLEY_TRANSPORT", "polling")
+        transport = make_transport(
+            kind, host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
+            port=os.environ.get("PARLEY_MQ_PORT", "17352"),
+            token=os.environ.get("MQ_TOKEN"),
+            url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
+            servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
+        n = Notifier(transport, rooms=args.room, wake_cmd=args.wake_cmd, box=args.box,
+                     debounce_s=args.debounce)
         await n.start()
         print(f"[parley notify] watching {args.room} (Ctrl-C to stop)")
         try:

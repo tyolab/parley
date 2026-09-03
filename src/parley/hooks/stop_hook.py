@@ -46,19 +46,21 @@ def main():
     except Exception:  # noqa: BLE001 - malformed/absent stdin falls back to empty
         stdin = {}
     stop_hook_active = bool(stdin.get("stop_hook_active"))
-    gw = os.environ.get("PARLEY_GW", "http://127.0.0.1:8790")
-    token = os.environ.get("PARLEY_TOKEN")
-    handle = os.environ.get("PARLEY_AGENT")
-    mode = os.environ.get("PARLEY_STOP_MODE", "engage")
+    # Fail-open across the ENTIRE decision path (fetch + decide + print): a Stop hook
+    # must never wedge a session on any error, including an unexpected response shape.
     try:
+        gw = os.environ.get("PARLEY_GW", "http://127.0.0.1:8790")
+        token = os.environ.get("PARLEY_TOKEN")
+        handle = os.environ.get("PARLEY_AGENT")
+        mode = os.environ.get("PARLEY_STOP_MODE", "engage")
         poll = fetch_deliver(gw, token, handle)
-    except Exception:  # noqa: BLE001 - fail-open: never wedge a session
-        sys.exit(0)  # fail-open
-    action = decide(poll, stop_hook_active, mode)
-    if action["kind"] == "block":
-        print(json.dumps({"decision": "block", "reason": action["reason"]}))
-    elif action["kind"] == "notify":
-        print(action["text"])
+        action = decide(poll, stop_hook_active, mode)
+        if action["kind"] == "block":
+            print(json.dumps({"decision": "block", "reason": action["reason"]}))
+        elif action["kind"] == "notify":
+            print(action["text"])
+    except Exception:  # noqa: BLE001, S110 - fail-open: never wedge a session
+        pass
     sys.exit(0)
 
 

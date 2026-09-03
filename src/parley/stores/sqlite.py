@@ -64,6 +64,15 @@ class SqliteStore:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(_SCHEMA)
+        # Migration: a DB created before the delivery cursor landed has a
+        # conv_members table without `delivery_read_id`. CREATE TABLE IF NOT EXISTS
+        # won't add it, so every box_view delivery path (/deliver, Stop-hook,
+        # notifier) would crash. Add the column in place if it is missing.
+        cur = await db.execute("PRAGMA table_info(conv_members)")
+        cols = {r["name"] for r in await cur.fetchall()}
+        if "delivery_read_id" not in cols:
+            await db.execute("ALTER TABLE conv_members ADD COLUMN "
+                             "delivery_read_id INTEGER NOT NULL DEFAULT 0")
         await db.commit()
         return cls(db)
 

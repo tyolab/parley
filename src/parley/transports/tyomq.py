@@ -36,7 +36,11 @@ class TyoMqTransport:
 
     def __init__(self, host="localhost", port=17352, token=None):
         self._host, self._port, self._token = host, port, token
-        self._loop = asyncio.get_event_loop()
+        # Capture the RUNNING loop (the adapter is always constructed inside an
+        # async context). get_event_loop() could bind a different, non-running loop
+        # if constructed before asyncio.run(), leaving run_coroutine_threadsafe
+        # dispatches on a loop that never services them.
+        self._loop = asyncio.get_running_loop()
         self._subs: dict[str, set] = {}
         self._pub = None
         self._ready = threading.Event()

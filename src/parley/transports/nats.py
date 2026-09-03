@@ -36,10 +36,13 @@ class NatsTransport:
     async def subscribe(self, topic, cb):
         nc = await self._conn()
         async def _handler(msg):
-            sig = json.loads(msg.data.decode())
-            res = cb(sig)
-            if inspect.isawaitable(res):
-                await res
+            try:
+                sig = json.loads(msg.data.decode())
+                res = cb(sig)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:  # noqa: BLE001, S110 - one bad message/callback must not kill the subscription
+                pass
         sub = await nc.subscribe(topic, cb=_handler)
         return _NatsSub(sub)
 

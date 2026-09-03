@@ -37,10 +37,13 @@ class RedisTransport:
             async for msg in pubsub.listen():
                 if msg.get("type") != "message":
                     continue
-                sig = json.loads(msg["data"])
-                res = cb(sig)
-                if inspect.isawaitable(res):
-                    await res
+                try:
+                    sig = json.loads(msg["data"])
+                    res = cb(sig)
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception:  # noqa: BLE001, S112 - one bad message/callback must not kill the subscription
+                    continue
 
         task = asyncio.create_task(_reader())
         return _RedisSub(self, topic, cb, task, pubsub)

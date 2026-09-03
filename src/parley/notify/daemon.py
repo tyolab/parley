@@ -33,19 +33,27 @@ class Notifier:
         if self._cooling:
             return  # inside the cooldown window from a recent wake
         self._cooling = True
-        await self._fire(sig)
-        self._cool_task = asyncio.create_task(self._cooldown())
+        try:
+            await self._fire(sig)
+        finally:
+            # Always schedule the cooldown, even if _fire raised, so a single failed
+            # wake can never leave the notifier stuck in the cooling state (which
+            # would silently suppress every future nudge).
+            self._cool_task = asyncio.create_task(self._cooldown())
 
     async def _cooldown(self):
         await asyncio.sleep(self._debounce)
         self._cooling = False
 
     async def _fire(self, sig):
-        cmd = self._cmd.format(box=self._box, room=sig.get("room", ""),
-                               **{"from": sig.get("from", "")})
-        res = self._runner(cmd)          # runner may be sync or async
-        if inspect.isawaitable(res):
-            await res
+        try:
+            cmd = self._cmd.format(box=self._box, room=sig.get("room", ""),
+                                   **{"from": sig.get("from", "")})
+            res = self._runner(cmd)          # runner may be sync or async
+            if inspect.isawaitable(res):
+                await res
+        except Exception:  # noqa: BLE001, S110 - a failed wake must not wedge the notifier or kill the subscription
+            pass
 
     async def stop(self):
         for s in self._subs:
