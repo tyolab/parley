@@ -1,5 +1,5 @@
 import asyncio
-import pytest
+
 from parley.transports.fake import FakeTransport
 from parley.transports.polling import PollingTransport
 

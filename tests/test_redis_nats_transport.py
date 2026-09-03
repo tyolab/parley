@@ -1,4 +1,5 @@
 import asyncio
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -6,9 +7,9 @@ pytestmark = pytest.mark.asyncio
 
 async def _port_up(host, port):
     try:
-        r, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.0)
+        _r, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=1.0)
         w.close(); return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - liveness probe: any failure means "down"
         return False
 
 

@@ -43,7 +43,7 @@ def fetch_deliver(gw, token, handle, timeout=2.0):
 def main():
     try:
         stdin = json.load(sys.stdin) if not sys.stdin.isatty() else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - malformed/absent stdin falls back to empty
         stdin = {}
     stop_hook_active = bool(stdin.get("stop_hook_active"))
     gw = os.environ.get("PARLEY_GW", "http://127.0.0.1:8790")
@@ -52,7 +52,7 @@ def main():
     mode = os.environ.get("PARLEY_STOP_MODE", "engage")
     try:
         poll = fetch_deliver(gw, token, handle)
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail-open: never wedge a session
         sys.exit(0)  # fail-open
     action = decide(poll, stop_hook_active, mode)
     if action["kind"] == "block":

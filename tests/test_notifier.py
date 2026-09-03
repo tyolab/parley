@@ -1,7 +1,9 @@
 import asyncio
+
 import pytest
-from parley.transports.fake import FakeTransport
+
 from parley.notify.daemon import Notifier
+from parley.transports.fake import FakeTransport
 
 
 @pytest.mark.asyncio

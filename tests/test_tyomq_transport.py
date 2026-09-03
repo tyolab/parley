@@ -1,5 +1,6 @@
 import asyncio
 import os
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -10,10 +11,10 @@ MQ_PORT = int(os.environ.get("PARLEY_MQ_PORT", "17352"))
 
 async def _broker_up():
     try:
-        r, w = await asyncio.wait_for(asyncio.open_connection(MQ_HOST, MQ_PORT), timeout=1.5)
+        _r, w = await asyncio.wait_for(asyncio.open_connection(MQ_HOST, MQ_PORT), timeout=1.5)
         w.close()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - liveness probe: any failure means "down"
         return False
 
 
@@ -31,7 +32,7 @@ async def test_tyomq_publish_subscribe_roundtrip():
     await t.publish("roomZ", {"room": "roomZ", "from": "tester", "at": "now"})
     try:
         await asyncio.wait_for(got.wait(), timeout=5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # The broker at MQ_HOST:MQ_PORT is reachable but may require auth
         # (tyo-mq realm auth) that this environment doesn't have via
         # MQ_TOKEN. That's a credentials/environment gap, not a transport

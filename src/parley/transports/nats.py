@@ -9,7 +9,7 @@ class _NatsSub:
     async def close(self):
         try:
             await self._sub.unsubscribe()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass
 
 
@@ -30,7 +30,7 @@ class NatsTransport:
         try:
             nc = await self._conn()
             await nc.publish(topic, json.dumps(signal).encode())
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass
 
     async def subscribe(self, topic, cb):
@@ -47,5 +47,5 @@ class NatsTransport:
         if self._nc is not None:
             try:
                 await self._nc.drain()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort
                 pass

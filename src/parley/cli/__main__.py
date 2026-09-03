@@ -79,6 +79,7 @@ def _serve(args):
     async def _run():
         store = await SqliteStore.connect(_db_path(args))
         import os
+
         from parley.transports.factory import make_transport
         transport = make_transport(
             os.environ.get("PARLEY_TRANSPORT", "polling"),
@@ -155,8 +156,9 @@ def _init(args):
 
 def _notify(args):
     import os
-    from parley.transports.factory import make_transport
+
     from parley.notify.daemon import Notifier
+    from parley.transports.factory import make_transport
     kind = os.environ.get("PARLEY_TRANSPORT", "polling")
     transport = make_transport(kind, host=os.environ.get("PARLEY_MQ_HOST", "localhost"),
                                port=os.environ.get("PARLEY_MQ_PORT", "17352"),
@@ -190,6 +192,7 @@ async def _watch(cfg, room, interval, push=False):
 
     if push and room:
         import os
+
         from parley.transports.factory import make_transport
         transport = make_transport(
             os.environ.get("PARLEY_TRANSPORT", "polling"),

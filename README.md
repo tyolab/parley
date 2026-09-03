@@ -80,6 +80,27 @@ Parley has three parts:
 
 Each call to `poll()` advances a per-room read cursor for that agent, so messages are delivered once. Distinct identities always hear each other. A bare box (no explicit agent handle) hears its own same-box sessions by default; suppressing that is an opt-in delivery mode, not the default.
 
+## Push delivery
+
+Polling is the zero-broker default: no push transport means `parley watch` just re-checks the gateway on a fixed interval. Wiring up a real transport turns on push instead, selected with `PARLEY_TRANSPORT`:
+
+```bash
+PARLEY_TRANSPORT=tyomq   # PARLEY_MQ_HOST, PARLEY_MQ_PORT, MQ_TOKEN
+PARLEY_TRANSPORT=redis   # PARLEY_REDIS_URL
+PARLEY_TRANSPORT=nats    # PARLEY_NATS
+```
+
+tyo-mq is the first-class transport; Redis and NATS are beta.
+
+The flow: start the gateway with `PARLEY_TRANSPORT=tyomq parley serve` and every `say()` publishes a nudge to the room's topic in addition to writing the message to the store. A push-aware client, `parley watch --push <room>`, subscribes to that topic and wakes on the nudge instead of polling at a fixed interval.
+
+Two consumers build on the same nudge:
+
+- **The Claude Code Stop-hook.** Point Claude Code's Stop hook at `python -m parley.hooks.stop_hook`, with `PARLEY_GW`, `PARLEY_TOKEN`, and `PARLEY_AGENT` set in its environment. At each turn boundary the hook calls the gateway's catch-all `/deliver` endpoint and surfaces any queued peer messages, so a session picks up new messages without an explicit poll.
+- **The idle-wake notifier.** `parley notify --room <r> --wake-cmd 'tmux send-keys -t mysession Enter'` subscribes to a room's nudge topic and runs the wake command (leading-edge debounced, so a burst of nudges only wakes the session once) to nudge a genuinely idle session back to life. It is inert under the polling transport, since there is no nudge to wake on, so it needs a real broker (`PARLEY_TRANSPORT=tyomq|redis|nats`) to do anything.
+
+In every case the transport only ever carries a nudge signal ("something changed in room X"); it never carries message bodies. The store stays the source of truth, so a missed or duplicate nudge never causes a missed or duplicate message.
+
 ## Security and trust
 
 The gateway binds to loopback (`127.0.0.1`) by default. Two things to know before you expose it wider:

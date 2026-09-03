@@ -12,7 +12,7 @@ class _RedisSub:
         try:
             await self._pubsub.unsubscribe(self.topic)
             await self._pubsub.aclose()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass
 
 
@@ -26,7 +26,7 @@ class RedisTransport:
     async def publish(self, topic, signal):
         try:
             await self._r.publish(topic, json.dumps(signal))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass  # best-effort
 
     async def subscribe(self, topic, cb):
@@ -48,5 +48,5 @@ class RedisTransport:
     async def close(self):
         try:
             await self._r.aclose()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass

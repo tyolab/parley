@@ -1,7 +1,8 @@
 import pytest
+
 from parley.transports.factory import make_transport
-from parley.transports.polling import PollingTransport
 from parley.transports.fake import FakeTransport
+from parley.transports.polling import PollingTransport
 
 
 def test_polling_default():

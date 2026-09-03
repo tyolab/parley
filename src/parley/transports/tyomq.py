@@ -69,7 +69,7 @@ class TyoMqTransport:
             # a background thread that services the connection (and drives
             # the AUTH/CONSUME callbacks above) independently of this one.
             self._pub.connect(-1)
-        except Exception:
+        except Exception:  # noqa: BLE001 - never hang/fail the constructor
             self._pub = None
         finally:
             self._ready.set()  # never hang the constructor
@@ -86,7 +86,7 @@ class TyoMqTransport:
             # broadcast (not the unicast default of produce()) delivers one
             # copy to every realm subscriber — what a fan-out nudge needs.
             await asyncio.to_thread(self._pub.broadcast, signal, self.EVENT)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort
             pass  # best-effort
 
     async def subscribe(self, topic, cb):
@@ -99,5 +99,5 @@ class TyoMqTransport:
         if self._pub is not None:
             try:
                 await asyncio.to_thread(self._pub.disconnect)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort
                 pass
