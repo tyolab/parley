@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+
 import aiosqlite
 
 from parley.core.store import self_filter
@@ -38,7 +39,7 @@ CREATE TABLE IF NOT EXISTS agent_seq (
 
 
 def _now() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.UTC).isoformat()
 
 
 class SqliteStore:
@@ -120,8 +121,8 @@ class SqliteStore:
                 res = self.on_message(name, agent_id, mid)
                 if hasattr(res, "__await__"):
                     await res
-            except Exception:
-                pass  # nudge is best-effort
+            except Exception:  # noqa: BLE001, S110 - nudge is best-effort
+                pass
         return {"ok": True, "id": mid}
 
     async def next_agent_seq(self, box, slug):

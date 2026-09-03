@@ -1,9 +1,10 @@
-import pytest
 import httpx
+import pytest
+
+from parley.client import Client
+from parley.gateway.app import build_app
 from parley.stores.sqlite import SqliteStore
 from parley.transports.polling import PollingTransport
-from parley.gateway.app import build_app
-from parley.client import Client
 
 
 @pytest.fixture

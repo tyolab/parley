@@ -1,4 +1,4 @@
-from parley.core.identity import compose_agent_id, slugify_name, next_handle
+from parley.core.identity import compose_agent_id, next_handle, slugify_name
 
 
 def test_compose_honors_exact_box():

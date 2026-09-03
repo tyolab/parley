@@ -1,4 +1,5 @@
-from typing import Protocol, Callable, Awaitable, Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
 
 class Subscription(Protocol):

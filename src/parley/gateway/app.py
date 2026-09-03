@@ -1,5 +1,7 @@
 import datetime
-from fastapi import FastAPI, Request, HTTPException
+
+from fastapi import FastAPI, HTTPException, Request
+
 from parley.gateway.identity import resolve_identity
 
 
@@ -42,11 +44,11 @@ def build_app(store, transport, token: str | None = None) -> FastAPI:
         _auth(request); agent_id, _ = _ident(request)
         res = await store.say(name, agent_id, payload["body"], payload.get("kind", "say"))
         if res.get("ok"):
-            at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            at = datetime.datetime.now(datetime.UTC).isoformat()
             try:
                 await transport.publish(name, {"room": name, "from": agent_id, "at": at})
-            except Exception:
-                pass  # nudge is best-effort
+            except Exception:  # noqa: BLE001, S110 - nudge is best-effort
+                pass
         return res
 
     @app.get("/rooms/{name}/members")

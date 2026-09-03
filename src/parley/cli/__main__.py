@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import os
 import socket
-import sys
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,9 +47,10 @@ def _db_path(args) -> str:
 
 def _serve(args):
     import uvicorn
+
+    from parley.gateway.app import build_app
     from parley.stores.sqlite import SqliteStore
     from parley.transports.polling import PollingTransport
-    from parley.gateway.app import build_app
 
     async def _run():
         # Connect the store and run uvicorn's server on the SAME event loop: an

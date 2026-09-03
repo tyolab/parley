@@ -1,4 +1,4 @@
-from typing import Protocol, Callable
+from typing import Protocol
 
 
 def self_filter(agent_id: str, box: str | None, col: str,
