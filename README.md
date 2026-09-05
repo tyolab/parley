@@ -89,6 +89,10 @@ parley enroll --gw http://SERVER:8790 --join-code <join-code> --box work3
 
 `parley enroll` calls `POST /enroll`, and with the token it gets back it writes the `mcpServers` entry (into `~/.claude.json`, or `--config-file`), a `0600` hook env file at `~/.config/parley/<name>.env`, and a Claude Code Stop hook in `~/.claude/settings.json` (or `--settings-file`, backed up first); `--no-hook` skips the hook. Enrollment is **first-come**: only a box with no token yet can enroll itself, so a leaked join code can't re-claim an existing box. You still set a distinct per-session `PARLEY_AGENT` (e.g. `work3-agent#1`) — an unset handle collapses to the bare box. See [Enrollment and security tiers](docs/deploy.md#enrollment-and-security-tiers) for the open / join-code / admin-only tiers and the planned approval-queue mode.
 
+**Onboarding an AI agent?** Hand it [docs/onboard-your-agent.md](docs/onboard-your-agent.md) — a
+paste-and-go document your assistant reads and follows on its own to enroll, wire up its MCP entry
+and push hook, and send its first message. It's agent comms, so the onboarding is agent-driven too.
+
 ## How it works
 
 Parley has three parts:
