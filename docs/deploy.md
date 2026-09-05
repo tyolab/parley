@@ -145,9 +145,77 @@ PARLEY_AGENT=bob parley watch --push general
 > (`PARLEY_TRANSPORT=nats`, `PARLEY_NATS`) are also selectable; tyo-mq is the
 > first-class transport.
 
+## Enrollment and security tiers
+
+How a box gets its token depends on which of three tiers you run the gateway in:
+
+| Tier            | Gateway start                                | Who can get a token                                     |
+| --------------- | -------------------------------------------- | ------------------------------------------------------- |
+| Open (dev)      | `parley serve` (no `--token`)                | anyone on the network; minting is disabled              |
+| Join-code       | `parley serve --token <admin> ` + `PARLEY_JOIN_CODE=<code>` | a box that holds the shared join code, once per box |
+| Admin-only      | `parley serve --token <admin>`               | only the holder of the admin secret (`parley token`)    |
+
+The tiers stack: an admin-secured gateway is always able to mint via
+`/admin/agents`; setting `PARLEY_JOIN_CODE` additionally opens the self-serve
+`/enroll` path. Anti-spoof is preserved in every tier — a token is bound
+server-side to its box, and self-serve enrollment is **first-come**: only a box
+that has no token yet can enroll itself. A box that is already enrolled must be
+re-issued by an admin, so a leaked join code can never mint a second token for an
+existing box and impersonate its sessions.
+
+### Self-serve: `parley enroll` (one command)
+
+Turn on the join-code tier by giving the gateway a join code (share it with the
+boxes you want to let in):
+
+```bash
+PARLEY_JOIN_CODE=<join-code> parley serve --host 0.0.0.0 --port 8790 --token <admin-secret>
+```
+
+Then, on each client box, a single command claims the box, writes the MCP entry,
+and (unless `--no-hook`) wires the Claude Code Stop hook:
+
+```bash
+parley enroll --gw http://SERVER:8790 --join-code <join-code> --box work3
+```
+
+`enroll` calls `POST /enroll`, and with the token it gets back it:
+
+- writes the `mcpServers` entry into `~/.claude.json` (override `--config-file`),
+  pointing at the MCP URL derived from the gateway host and the MCP port the
+  server advertises (override with `--mcp-url` / `--mcp-port`);
+- writes a `0600` env file at `~/.config/parley/<name>.env` carrying
+  `PARLEY_GW`, `PARLEY_TOKEN`, `PARLEY_AGENT`, and `PARLEY_STOP_MODE`;
+- registers (idempotently, replacing any prior parley entry) a Stop hook in
+  `~/.claude/settings.json` (override `--settings-file`, backed up once to
+  `settings.json.bak-parley`) that sources that env file and runs
+  `python -m parley.hooks.stop_hook`.
+
+Use `--no-hook` to skip the Stop-hook wiring, `--handle` to set the default
+`PARLEY_AGENT` baked into the env file (defaults to the box), and `--stop-mode`
+(default `notify`) for the hook mode. As with the manual flow, still set a
+distinct per-session handle (see step 3 below): an unset `PARLEY_AGENT` collapses
+to the bare box, the box-catch-all identity.
+
+### Approval-queue tier (planned — not yet implemented)
+
+A future `PARLEY_ENROLL_MODE=open|approve` would add a fourth posture between
+join-code and admin-only. In `approve` mode, `POST /enroll` would not mint a
+token immediately: it would insert the request into a pending-enrollments table
+(box, requested label, timestamp, requester address) and return `202 Accepted`.
+An admin would then list pending requests and approve or deny each one; approval
+mints the token exactly as today and marks the request fulfilled, and the client
+polls (or is notified) to pick up its token. This keeps the low-friction "one
+command from the box" ergonomics while putting a human in the loop for who joins,
+and it composes with the existing first-come claim (an approved box still can't be
+re-enrolled without an admin). **This is a design sketch only; it is not
+implemented.**
+
 ## Client onboarding
 
-Do this once per client box after the gateway is running.
+Do this once per client box after the gateway is running. This is the manual /
+admin-mint path; for the one-command self-serve path see
+[Self-serve: `parley enroll`](#self-serve-parley-enroll-one-command) above.
 
 ### 1. Mint a per-agent token (on the server / admin box)
 

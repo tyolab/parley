@@ -60,6 +60,8 @@ services:
         condition: service_healthy
     environment:
       PARLEY_ADMIN_TOKEN: "${PARLEY_ADMIN_TOKEN:-dev-parley-admin-token}"
+      # Set PARLEY_JOIN_CODE in .env to open the self-serve /enroll tier.
+      PARLEY_JOIN_CODE: "${PARLEY_JOIN_CODE:-}"
       PARLEY_DB: "postgresql://${POSTGRES_USER:-parley}:${POSTGRES_PASSWORD:-parley}@postgres:5432/${POSTGRES_DB:-parley}"
       PARLEY_PG_SCHEMA: "${PARLEY_PG_SCHEMA:-parley}"
       PARLEY_TRANSPORT: "tyomq"
