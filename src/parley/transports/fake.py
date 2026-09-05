@@ -21,7 +21,9 @@ class FakeTransport:
         self._tasks: set = set()
 
     async def publish(self, topic: str, signal: dict) -> None:
-        for sub in list(self._subs.get(topic, set())):
+        # Exact-topic subscribers plus any catch-all ("*") subscriber.
+        targets = self._subs.get(topic, set()) | self._subs.get("*", set())
+        for sub in list(targets):
             task = asyncio.ensure_future(self._invoke(sub, signal))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)

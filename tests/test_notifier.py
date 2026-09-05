@@ -55,3 +55,21 @@ async def test_notifier_survives_a_failing_wake_command():
     await asyncio.sleep(0.05)
     await n.stop()
     assert calls == ["w"]
+
+
+@pytest.mark.asyncio
+async def test_notifier_all_rooms_wakes_on_any_room():
+    # rooms=["*"] is the catch-all: a nudge for ANY room fires the wake, so an
+    # idle-wake notifier need not enumerate rooms up front.
+    transport = FakeTransport()
+    calls = []
+    async def runner(cmd): calls.append(cmd)
+    n = Notifier(transport, rooms=["*"], wake_cmd="wake {room} {from}",
+                 runner=runner, debounce_s=0)
+    await n.start()
+    await transport.publish("alpha", {"room": "alpha", "from": "a"})
+    await asyncio.sleep(0.02)
+    await transport.publish("beta", {"room": "beta", "from": "b"})
+    await asyncio.sleep(0.02)
+    await n.stop()
+    assert calls == ["wake alpha a", "wake beta b"]

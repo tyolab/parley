@@ -62,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     en.add_argument("--stop-mode", default="notify", choices=["notify", "engage"])
 
     nt = sub.add_parser("notify", help="run the idle-wake notifier daemon")
-    nt.add_argument("--room", action="append", required=True, help="room to watch (repeatable)")
+    nt.add_argument("--room", action="append", help="room to watch (repeatable)")
+    nt.add_argument("--all-rooms", action="store_true",
+                    help="watch every room (catch-all); needs a push transport (e.g. tyomq)")
     nt.add_argument("--wake-cmd", required=True, help="command template, {box}/{room}/{from}")
     nt.add_argument("--box", default="")
     nt.add_argument("--debounce", type=float, default=0.5)
@@ -267,6 +269,12 @@ def _notify(args):
     from parley.notify.daemon import Notifier
     from parley.transports.factory import make_transport
 
+    rooms = ["*"] if args.all_rooms else args.room
+    if not rooms:
+        print("[parley notify] error: specify --room <name> (repeatable) or --all-rooms",
+              file=sys.stderr)
+        return 2
+
     async def _run():
         # Build the transport INSIDE the running loop: a thread-bridged adapter
         # (tyo-mq) captures the running loop at construction, so constructing it
@@ -278,10 +286,11 @@ def _notify(args):
             token=os.environ.get("MQ_TOKEN"),
             url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
             servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
-        n = Notifier(transport, rooms=args.room, wake_cmd=args.wake_cmd, box=args.box,
+        n = Notifier(transport, rooms=rooms, wake_cmd=args.wake_cmd, box=args.box,
                      debounce_s=args.debounce)
         await n.start()
-        print(f"[parley notify] watching {args.room} (Ctrl-C to stop)")
+        label = "all rooms" if args.all_rooms else ", ".join(rooms)
+        print(f"[parley notify] watching {label} (Ctrl-C to stop)")
         try:
             while True:
                 await asyncio.sleep(3600)
@@ -349,7 +358,7 @@ def main(argv=None):
     if args.cmd == "enroll":
         raise SystemExit(_enroll(args))
     if args.cmd == "notify":
-        _notify(args)
+        raise SystemExit(_notify(args))
         return
     cfg = resolve_config(args)
     if args.cmd == "say":

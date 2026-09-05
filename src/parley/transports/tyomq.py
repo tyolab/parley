@@ -61,7 +61,10 @@ class TyoMqTransport:
 
             def _on_msg(data):
                 room = (data or {}).get("room")
-                for s in list(self._subs.get(room, set())):
+                # Deliver to exact-room subscribers plus any catch-all ("*")
+                # subscriber (used by an all-rooms idle-wake notifier).
+                targets = self._subs.get(room, set()) | self._subs.get("*", set())
+                for s in list(targets):
                     asyncio.run_coroutine_threadsafe(self._dispatch(s, data), self._loop)
 
             # A publisher is also a subscriber in tyo_mq_client; subscribe

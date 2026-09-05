@@ -288,7 +288,9 @@ PARLEY_TRANSPORT=tyomq PARLEY_MQ_HOST=127.0.0.1 PARLEY_MQ_PORT=17352 MQ_TOKEN=yo
 
 `--room` is repeatable; `--wake-cmd` is a template with `{box}`, `{room}`, and
 `{from}`; and the wake is leading-edge debounced (`--debounce`, default `0.5`s)
-so a burst of nudges only wakes the session once.
+so a burst of nudges only wakes the session once. Use **`--all-rooms`** instead of
+`--room` to wake on a nudge in *any* room (a catch-all, so you don't have to
+enumerate rooms up front) — needs a push transport (e.g. tyomq).
 
 ## Ports
 
