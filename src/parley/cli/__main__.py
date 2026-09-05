@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import os
 import socket
+import sys
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +45,21 @@ def build_parser() -> argparse.ArgumentParser:
     ini.add_argument("--token", required=True, help="a per-agent token (from `parley token`)")
     ini.add_argument("--name", default="parley")
     ini.add_argument("--file", default=os.path.expanduser("~/.claude.json"))
+
+    en = sub.add_parser("enroll", help="self-enroll a box with a join code and auto-wire it")
+    en.add_argument("--gw", default=None, help="gateway REST base, e.g. http://host:8890")
+    en.add_argument("--url", default=None, help="alias for --gw (REST base)")
+    en.add_argument("--join-code", default=None, help="shared join code (or env PARLEY_JOIN_CODE)")
+    en.add_argument("--box", required=True, help="the machine id to claim")
+    en.add_argument("--name", default="parley", help="MCP server entry name")
+    en.add_argument("--handle", default=None,
+                    help="default PARLEY_AGENT baked into the hook env (default = box)")
+    en.add_argument("--config-file", default=os.path.expanduser("~/.claude.json"))
+    en.add_argument("--settings-file", default=os.path.expanduser("~/.claude/settings.json"))
+    en.add_argument("--no-hook", action="store_true", help="skip Stop-hook wiring")
+    en.add_argument("--mcp-url", default=None, help="override the MCP URL")
+    en.add_argument("--mcp-port", type=int, default=None, help="override the MCP port")
+    en.add_argument("--stop-mode", default="notify", choices=["notify", "engage"])
 
     nt = sub.add_parser("notify", help="run the idle-wake notifier daemon")
     nt.add_argument("--room", action="append", required=True, help="room to watch (repeatable)")
@@ -94,11 +110,13 @@ def _serve(args):
             token=os.environ.get("MQ_TOKEN"),
             url=os.environ.get("PARLEY_REDIS_URL", "redis://127.0.0.1:6379"),
             servers=os.environ.get("PARLEY_NATS", "nats://127.0.0.1:4222"))
-        rest = build_app(store, transport, admin_token=args.token)
+        # null MCP port when --no-mcp, so /enroll advertises it honestly.
+        mcp_port = None if args.no_mcp else (args.mcp_port or (args.port + 1))
+        rest = build_app(store, transport, admin_token=args.token,
+                         join_code=os.environ.get("PARLEY_JOIN_CODE"), mcp_port=mcp_port)
         servers = [uvicorn.Server(uvicorn.Config(
             rest, host=args.host, port=args.port, log_level="info"))]
         if not args.no_mcp:
-            mcp_port = args.mcp_port or (args.port + 1)
             mcp_app = build_mcp_app(store, admin_token=args.token)
             servers.append(uvicorn.Server(uvicorn.Config(
                 mcp_app, host=args.host, port=mcp_port, log_level="info")))
@@ -158,6 +176,87 @@ def _init(args):
     from parley.cli.init_config import merge_mcp_entry
     merge_mcp_entry(args.file, name=args.name, url=args.url, token=args.token)
     print(f"[parley init] wrote '{args.name}' -> {args.url} into {args.file}")
+
+
+async def _enroll_request(rest, join_code, box):
+    """POST /enroll and return (status_code, json_dict). Isolated so the wiring flow
+    in `_enroll` can be tested without a live gateway."""
+    import httpx
+    async with httpx.AsyncClient(base_url=rest) as c:
+        r = await c.post("/enroll", json={"box": box},
+                         headers={"Authorization": f"Bearer {join_code}"})
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001 - non-JSON error body -> surface raw text
+            data = {"detail": r.text}
+        return r.status_code, data
+
+
+def _derive_mcp_url(rest, mcp_url, mcp_port, returned_mcp_port):
+    """MCP URL precedence: explicit --mcp-url; else gw host + (--mcp-port | the port
+    the server advertised | gw_port+1), path /mcp."""
+    if mcp_url:
+        return mcp_url
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(rest)
+    scheme = parts.scheme or "http"
+    gw_port = parts.port or (443 if scheme == "https" else 80)
+    port = mcp_port or returned_mcp_port or (gw_port + 1)
+    return urlunsplit((scheme, f"{parts.hostname}:{port}", "/mcp", "", ""))
+
+
+def _stop_hook_command(name):
+    # Source the per-name env file, let a live TYODE_AGENT override PARLEY_AGENT, then
+    # run the bundled Stop hook. Mirrors the proven working invocation.
+    return (f"bash -c 'set -a; . \"$HOME/.config/parley/{name}.env\"; "
+            f"[ -n \"${{TYODE_AGENT:-}}\" ] && PARLEY_AGENT=\"$TYODE_AGENT\"; "
+            f"exec python -m parley.hooks.stop_hook'")
+
+
+def _enroll(args):
+    rest = args.gw or args.url
+    if not rest:
+        print("[parley enroll] error: --gw (REST base URL) is required", file=sys.stderr)
+        return 2
+    join_code = args.join_code or os.environ.get("PARLEY_JOIN_CODE")
+    if not join_code:
+        print("[parley enroll] error: --join-code (or env PARLEY_JOIN_CODE) is required",
+              file=sys.stderr)
+        return 2
+    box = args.box
+    handle = args.handle or box
+
+    status, data = asyncio.run(_enroll_request(rest, join_code, box))
+    if status != 200:
+        detail = data.get("detail") if isinstance(data, dict) else data
+        print(f"[parley enroll] enrollment failed ({status}): {detail}", file=sys.stderr)
+        return 1
+    token = data["token"]
+    mcp_url = _derive_mcp_url(rest, args.mcp_url, args.mcp_port, data.get("mcp_port"))
+
+    from parley.cli.init_config import merge_mcp_entry, register_stop_hook, write_hook_env
+    config_file = os.path.expanduser(args.config_file)
+    merge_mcp_entry(config_file, name=args.name, url=mcp_url, token=token)
+
+    env_path = None
+    settings_file = None
+    if not args.no_hook:
+        env_path = os.path.expanduser(f"~/.config/parley/{args.name}.env")
+        write_hook_env(env_path, gw=rest, token=token, agent=handle, stop_mode=args.stop_mode)
+        settings_file = os.path.expanduser(args.settings_file)
+        register_stop_hook(settings_file, command=_stop_hook_command(args.name))
+
+    print(f"✅ enrolled as {box}")
+    print(f"  MCP entry '{args.name}' -> {mcp_url}")
+    print(f"  config:   {config_file}")
+    if env_path:
+        print(f"  hook env: {env_path} (mode 0600)")
+        print(f"  settings: {settings_file} (Stop hook registered)")
+    print(f"  next: set a distinct per-session handle, e.g. "
+          f"export PARLEY_AGENT={box}-agent#1")
+    print(f"        (an unset PARLEY_AGENT collapses to the bare box '{box}', "
+          f"the box-catch-all identity)")
+    return 0
 
 
 def _notify(args):
@@ -245,6 +344,8 @@ def main(argv=None):
     if args.cmd == "init":
         _init(args)
         return
+    if args.cmd == "enroll":
+        raise SystemExit(_enroll(args))
     if args.cmd == "notify":
         _notify(args)
         return
