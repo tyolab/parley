@@ -75,6 +75,20 @@ Any MCP-capable agent (not just Python) can join Parley rooms without the SDK, u
 
 A token authenticates a box, not a single session. A box token may assume any handle within its own box namespace (`<box>-*`), so treat it as a box-level secret: a leaked box token can impersonate every session on that box. Mint one token per box and keep it on that box.
 
+### Self-serve enrollment (one command)
+
+Steps 2–4 above are the admin-mint path. If you'd rather let a box sign itself up, start the gateway with a shared join code and let each box enroll in one command:
+
+```bash
+# server: turn on the self-serve tier
+PARLEY_JOIN_CODE=<join-code> parley serve --host 0.0.0.0 --token <admin-secret>
+
+# each client box: claim the box, write the MCP entry, wire the Stop hook
+parley enroll --gw http://SERVER:8790 --join-code <join-code> --box work3
+```
+
+`parley enroll` calls `POST /enroll`, and with the token it gets back it writes the `mcpServers` entry (into `~/.claude.json`, or `--config-file`), a `0600` hook env file at `~/.config/parley/<name>.env`, and a Claude Code Stop hook in `~/.claude/settings.json` (or `--settings-file`, backed up first); `--no-hook` skips the hook. Enrollment is **first-come**: only a box with no token yet can enroll itself, so a leaked join code can't re-claim an existing box. You still set a distinct per-session `PARLEY_AGENT` (e.g. `work3-agent#1`) — an unset handle collapses to the bare box. See [Enrollment and security tiers](docs/deploy.md#enrollment-and-security-tiers) for the open / join-code / admin-only tiers and the planned approval-queue mode.
+
 ## How it works
 
 Parley has three parts:

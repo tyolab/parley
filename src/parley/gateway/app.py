@@ -1,13 +1,17 @@
 import datetime
+import hmac
 import re
 
 from fastapi import FastAPI, HTTPException, Request
 
-from parley.gateway.identity import resolve_identity
+from parley.gateway.identity import _bearer, resolve_identity
+
+_BOX_RE = r"[A-Za-z0-9._-]+"
 
 
 def build_app(store, transport, admin_token: str | None = None,
-              *, token: str | None = None) -> FastAPI:
+              *, token: str | None = None,
+              join_code: str | None = None, mcp_port: int | None = None) -> FastAPI:
     # `token=` is a back-compat alias for the Plan-1 shared-secret parameter.
     admin_token = admin_token if admin_token is not None else token
     app = FastAPI(title="Parley")
@@ -54,7 +58,7 @@ def build_app(store, transport, admin_token: str | None = None,
             raise HTTPException(status_code=403,
                                 detail="minting disabled in open mode (start with --token)")
         box = _str_field(payload, "box", nonblank=True)
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", box):
+        if not re.fullmatch(_BOX_RE, box):
             # A box is a machine id. Reject '#'/spaces so a minted box can never equal
             # a composed session handle (e.g. 'work3-agent#1') and impersonate it.
             raise HTTPException(status_code=400,
@@ -62,6 +66,34 @@ def build_app(store, transport, admin_token: str | None = None,
         label = _str_field(payload, "label", required=False)
         token = await store.mint_agent_token(box, label)
         return {"token": token, "box": box}
+
+    @app.post("/enroll")
+    async def enroll(request: Request, payload: dict):
+        # Self-serve enrollment: a box claims itself with the shared join code and
+        # gets a per-agent token in one call. This is the token-tier middle ground
+        # between open (no token) and admin-only minting. Anti-spoof is preserved by
+        # the first-come claim below: only an unclaimed box may self-enroll.
+        if not join_code:
+            raise HTTPException(status_code=403,
+                                detail="enrollment disabled (set PARLEY_JOIN_CODE)")
+        supplied = _bearer(request.headers)
+        if not hmac.compare_digest(supplied, join_code):
+            # Constant-time compare so a wrong code leaks no timing signal.
+            raise HTTPException(status_code=403, detail="invalid join code")
+        box = _str_field(payload, "box", nonblank=True)
+        if not re.fullmatch(_BOX_RE, box):
+            raise HTTPException(status_code=400,
+                                detail="box must match [A-Za-z0-9._-] (no '#' or spaces)")
+        if await store.box_has_token(box):
+            # First-come claim: a box that already has any token can only be re-issued
+            # by an admin (via /admin/agents). This stops a leaked join code from
+            # minting a second token for an existing box and impersonating it.
+            raise HTTPException(
+                status_code=409,
+                detail=f"box '{box}' is already enrolled; ask an admin to rotate its token")
+        label = _str_field(payload, "label", required=False)
+        token = await store.mint_agent_token(box, label)
+        return {"token": token, "box": box, "mcp_port": mcp_port}
 
     @app.post("/rooms")
     async def create_room(request: Request, payload: dict):

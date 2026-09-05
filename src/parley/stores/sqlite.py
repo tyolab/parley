@@ -170,6 +170,11 @@ class SqliteStore:
         r = await cur.fetchone()
         return r["box"] if r else None
 
+    async def box_has_token(self, box):
+        cur = await self._db.execute(
+            "SELECT 1 FROM agent_tokens WHERE box=? LIMIT 1", (box,))
+        return (await cur.fetchone()) is not None
+
     async def _collect(self, agent_id, room, box, advance, box_view):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
                                    box_view=box_view)

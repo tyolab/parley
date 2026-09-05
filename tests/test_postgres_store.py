@@ -31,6 +31,8 @@ async def test_tokens_and_seq():
         assert await s.box_for_token("nope") is None
         assert await s.next_agent_seq("work3", "") == 1
         assert await s.next_agent_seq("work3", "") == 2
+        assert await s.box_has_token("work3") is True   # claimed by t1/t2 above
+        assert await s.box_has_token("neverseen") is False
     finally:
         await s.close()
 
