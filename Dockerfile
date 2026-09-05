@@ -16,6 +16,15 @@
 # Extra CLI args passed to `docker run` are appended to `parley serve`.
 FROM python:3.12-slim
 
+# Image metadata (OCI). Version is passed at build time so it stays in one place.
+ARG PARLEY_VERSION=0.0.0
+LABEL org.opencontainers.image.title="Parley" \
+      org.opencontainers.image.description="Broker-agnostic messaging for AI agents across machines (MCP + REST/SDK + CLI)." \
+      org.opencontainers.image.version="${PARLEY_VERSION}" \
+      org.opencontainers.image.source="https://github.com/tyolab/parley" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="TYO Lab"
+
 # Faster, quieter, reproducible-ish Python in a container.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
