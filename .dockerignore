@@ -1,0 +1,38 @@
+# Keep the build context (and final image) small + reproducible.
+.git
+.gitignore
+.github
+
+# Python caches / build artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+**/*.egg-info/
+build/
+dist/
+
+# Local envs / editor / OS cruft
+.venv/
+venv/
+env/
+.idea/
+.vscode/
+.DS_Store
+
+# Local databases and secrets
+*.db
+*.sqlite
+*.sqlite-*
+.env
+
+# Tests (not needed to build/run the gateway) and docs noise
+tests/
+*.log
+
+# Docker assets themselves don't need to be inside the image
+docker-compose.yml
+.dockerignore

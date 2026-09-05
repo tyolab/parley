@@ -1,0 +1,77 @@
+# Batteries-included Parley stack: Postgres store + tyo-mq push transport +
+# the Parley gateway. Every value has a sane default, so a bare
+#
+#     docker compose up -d
+#
+# works out of the box. Override anything via a .env file (see .env.example).
+#
+# The tyo-mq broker is built from its own source tree (TYOMQ_SRC, default
+# /data/tyolab/node/tyo-mq) using the Dockerfile it already ships; the Parley
+# realm + token are injected at start by docker/tyomq/entrypoint.sh so MQ_TOKEN
+# is the single source of truth on both sides.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-parley}"
+      POSTGRES_USER: "${POSTGRES_USER:-parley}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-parley}"
+    volumes:
+      - parley-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-parley} -d ${POSTGRES_DB:-parley}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  tyomq:
+    build:
+      context: .
+      dockerfile: docker/tyomq/Dockerfile
+      additional_contexts:
+        tyomqsrc: "${TYOMQ_SRC:-/data/tyolab/node/tyo-mq}"
+    entrypoint: ["/bin/sh", "/parley/tyomq-entrypoint.sh"]
+    environment:
+      TYO_MQ_AUTH_ENABLED: "true"
+      TYO_MQ_AUTO_ADMIN_TOKEN: "false"
+      TYO_MQ_ADMIN_TOKEN: "${TYO_MQ_ADMIN_TOKEN:-dev-tyomq-admin-token}"
+      TYO_MQ_SETTINGS_FILE: "/data/tyo-mq.settings.json"
+      PARLEY_MQ_REALM: "${PARLEY_MQ_REALM:-parley}"
+      MQ_TOKEN: "${MQ_TOKEN:-dev-parley-mq-token}"
+    volumes:
+      - ./docker/tyomq/entrypoint.sh:/parley/tyomq-entrypoint.sh:ro
+      - parley-tyomq:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:17352/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  parley:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tyomq:
+        condition: service_healthy
+    environment:
+      PARLEY_ADMIN_TOKEN: "${PARLEY_ADMIN_TOKEN:-dev-parley-admin-token}"
+      PARLEY_DB: "postgresql://${POSTGRES_USER:-parley}:${POSTGRES_PASSWORD:-parley}@postgres:5432/${POSTGRES_DB:-parley}"
+      PARLEY_PG_SCHEMA: "${PARLEY_PG_SCHEMA:-parley}"
+      PARLEY_TRANSPORT: "tyomq"
+      PARLEY_MQ_HOST: "tyomq"
+      PARLEY_MQ_PORT: "17352"
+      MQ_TOKEN: "${MQ_TOKEN:-dev-parley-mq-token}"
+      PARLEY_PORT: "8790"
+    ports:
+      - "${PARLEY_PORT:-8790}:8790"
+      - "${PARLEY_MCP_PORT:-8791}:8791"
+    restart: unless-stopped
+
+volumes:
+  parley-pg:
+  parley-tyomq:
