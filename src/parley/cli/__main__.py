@@ -207,10 +207,12 @@ def _derive_mcp_url(rest, mcp_url, mcp_port, returned_mcp_port):
 
 def _stop_hook_command(name):
     # Source the per-name env file, let a live TYODE_AGENT override PARLEY_AGENT, then
-    # run the bundled Stop hook. Mirrors the proven working invocation.
+    # run the bundled Stop hook. Uses sys.executable (the interpreter running `enroll`,
+    # which by definition has parley installed) rather than a bare `python` that may not
+    # exist or lack parley on the target box (venv/pipx/system all differ).
     return (f"bash -c 'set -a; . \"$HOME/.config/parley/{name}.env\"; "
             f"[ -n \"${{TYODE_AGENT:-}}\" ] && PARLEY_AGENT=\"$TYODE_AGENT\"; "
-            f"exec python -m parley.hooks.stop_hook'")
+            f"exec {sys.executable} -m parley.hooks.stop_hook'")
 
 
 def _enroll(args):
