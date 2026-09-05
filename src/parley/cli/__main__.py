@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         c.add_argument("room", nargs="?" if name == "watch" else None)
         c.add_argument("--gw", default=None)
         c.add_argument("--agent", default=None)
+        c.add_argument("--token", default=None)
         if name == "watch":
             c.add_argument("--interval", type=float, default=2.0)
             c.add_argument("--push", action="store_true")
@@ -30,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     sy.add_argument("text")
     sy.add_argument("--gw", default=None)
     sy.add_argument("--agent", default=None)
+    sy.add_argument("--token", default=None)
 
     tk = sub.add_parser("token", help="mint a per-agent token (admin)")
     tk.add_argument("--gw", default=None)
@@ -54,7 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_config(args) -> dict:
     gw = getattr(args, "gw", None) or os.environ.get("PARLEY_GW") or "http://127.0.0.1:8790"
     agent = getattr(args, "agent", None) or os.environ.get("PARLEY_AGENT") or socket.gethostname()
-    return {"gw": gw, "agent": agent}
+    token = getattr(args, "token", None) or os.environ.get("PARLEY_TOKEN")
+    return {"gw": gw, "agent": agent, "token": token}
 
 
 def _db_path(args) -> str:
@@ -124,7 +127,7 @@ def _serve(args):
 
 async def _say(cfg, room, text):
     from parley.client import Client
-    c = Client(base_url=cfg["gw"], agent=cfg["agent"])
+    c = Client(base_url=cfg["gw"], agent=cfg["agent"], token=cfg.get("token"))
     try:
         print(await c.say(room, text))
     finally:
@@ -133,7 +136,7 @@ async def _say(cfg, room, text):
 
 async def _join(cfg, room):
     from parley.client import Client
-    c = Client(base_url=cfg["gw"], agent=cfg["agent"])
+    c = Client(base_url=cfg["gw"], agent=cfg["agent"], token=cfg.get("token"))
     try:
         print(await c.join(room))
     finally:
@@ -191,7 +194,7 @@ def _notify(args):
 
 async def _watch(cfg, room, interval, push=False):
     from parley.client import Client
-    c = Client(base_url=cfg["gw"], agent=cfg["agent"])
+    c = Client(base_url=cfg["gw"], agent=cfg["agent"], token=cfg.get("token"))
 
     async def _drain():
         for conv in await c.poll(room):
