@@ -153,6 +153,11 @@ class PostgresStore:
         async with self._pool.acquire() as c:
             return await c.fetchval("SELECT box FROM agent_tokens WHERE token=$1", token)
 
+    async def box_has_token(self, box):
+        async with self._pool.acquire() as c:
+            return bool(await c.fetchval(
+                "SELECT 1 FROM agent_tokens WHERE box=$1 LIMIT 1", box))
+
     async def _collect(self, agent_id, room, box, advance, box_view):
         # box_view reuses $3 (agent) in the predicate exactly like board._self_filter;
         # extra is empty and $4 is never referenced.

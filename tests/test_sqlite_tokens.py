@@ -22,3 +22,9 @@ async def test_box_for_token_roundtrip(store):
 async def test_box_for_unknown_token_is_none(store):
     assert await store.box_for_token("nope") is None
     assert await store.box_for_token("") is None
+
+async def test_box_has_token_reflects_mint(store):
+    assert await store.box_has_token("work3") is False  # unclaimed box
+    await store.mint_agent_token("work3")
+    assert await store.box_has_token("work3") is True   # now claimed
+    assert await store.box_has_token("elitebook2") is False  # a different box is still free
