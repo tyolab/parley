@@ -11,7 +11,7 @@ from parley.transports.fake import FakeTransport
 
 
 @pytest.mark.asyncio
-async def test_say_nudges_notifier_and_delivery_cursor_is_independent():
+async def test_say_nudges_notifier_and_delivery_dedupes_with_poll():
     store = await SqliteStore.connect(":memory:")
     transport = FakeTransport()
     app = build_app(store, transport)
@@ -36,6 +36,6 @@ async def test_say_nudges_notifier_and_delivery_cursor_is_independent():
     d = await bob.deliver()
     assert [m["body"] for c in d for m in c["messages"]] == ["hello"]
     i = await bob.poll()
-    assert [m["body"] for c in i for m in c["messages"]] == ["hello"]  # independent cursor
+    assert i == []  # shared cursor: deliver already consumed it, poll never echoes it
 
     await n.stop(); await alice.close(); await bob.close(); await store.close()

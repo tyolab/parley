@@ -162,7 +162,13 @@ class PostgresStore:
         # box_view reuses $3 (agent) in the predicate exactly like board._self_filter;
         # extra is empty and $4 is never referenced.
         pred, _extra = self_filter(agent_id, box, "from_agent", "$3", "$4", box_view=box_view)
-        cursor_col = "delivery_read_id" if box_view else "last_read_id"
+        # The separate delivery cursor is ONLY for the bare-box catch-all hook (a
+        # distinct identity that can collide with a handle-less MCP session on the
+        # same conv_members row). A per-session handle's hook shares its own read
+        # cursor with its MCP polls, so a message seen via either path is never
+        # re-surfaced by the other (was: box_view alone → double-delivery/echo).
+        box_catchall = box_view and box is not None and agent_id == box
+        cursor_col = "delivery_read_id" if box_catchall else "last_read_id"
         out = []
         # Only a cursor-advancing poll needs to serialize (FOR UPDATE) on the member
         # rows; a read-only peek takes no lock so it never blocks concurrent polls.

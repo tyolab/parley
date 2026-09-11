@@ -22,14 +22,38 @@ async def test_delivery_poll_does_not_move_interactive_cursor(store):
     assert sorted(m["body"] for o in i for m in o["messages"]) == \
         ["other-box msg", "same-box session msg"]
 
-async def test_cursors_are_independent_both_directions(store):
-    await store.create_room("r", "a")
-    await store.join("r", "b")
-    await store.say("r", "b", "m1")
-    assert len(await store.poll("a", box=None, box_view=False)) == 1
-    assert await store.poll("a", box=None, box_view=False) == []
-    assert len(await store.poll("a", box=None, box_view=True)) == 1
-    assert await store.poll("a", box=None, box_view=True) == []
+async def test_session_handle_delivery_shares_read_cursor(store):
+    # A per-session handle (agent_id != box) must NOT have an independent delivery
+    # cursor: a message consumed via one path (Stop-hook /deliver=box_view or MCP
+    # poll) is never re-surfaced by the other. Otherwise the hook echoes messages
+    # the session already read/answered (the live bug this test guards against).
+    await store.create_room("r", "work3-agent#1")
+    await store.join("r", "work3-agent#2")
+    await store.say("r", "work3-agent#2", "m1")
+    # deliver (box_view=True) as the session handle consumes m1...
+    d = await store.poll("work3-agent#1", box="work3", box_view=True)
+    assert [m["body"] for o in d for m in o["messages"]] == ["m1"]
+    # ...and a subsequent interactive poll sees nothing new (shared cursor).
+    assert await store.poll("work3-agent#1", box="work3", box_view=False) == []
+    # and the reverse direction: interactive read then delivery must also dedupe.
+    await store.say("r", "work3-agent#2", "m2")
+    i = await store.poll("work3-agent#1", box="work3", box_view=False)
+    assert [m["body"] for o in i for m in o["messages"]] == ["m2"]
+    assert await store.poll("work3-agent#1", box="work3", box_view=True) == []
+
+
+async def test_bare_box_catchall_cursor_is_independent(store):
+    # The bare-box catch-all (agent_id == box) keeps a delivery cursor independent
+    # from the interactive cursor: it can share a conv_members row with a
+    # handle-less MCP session, so the two paths must not consume each other.
+    await store.create_room("r", "work3")
+    await store.join("r", "elitebook2")
+    await store.say("r", "elitebook2", "m1")
+    assert len(await store.poll("work3", box="work3", box_view=True)) == 1
+    assert await store.poll("work3", box="work3", box_view=True) == []
+    # the interactive cursor was untouched by the delivery poll above
+    assert len(await store.poll("work3", box="work3", box_view=False)) == 1
+    assert await store.poll("work3", box="work3", box_view=False) == []
 
 
 async def test_connect_migrates_old_db_missing_delivery_column(tmp_path):
