@@ -178,13 +178,19 @@ class SqliteStore:
     async def _collect(self, agent_id, room, box, advance, box_view):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
                                    box_view=box_view)
-        # The separate delivery cursor is ONLY for the bare-box catch-all hook (a
-        # distinct identity that can collide with a handle-less MCP session on the
-        # same conv_members row). A per-session handle's hook shares its own read
-        # cursor with its MCP polls, so a message seen via either path is never
-        # re-surfaced by the other (was: box_view alone → double-delivery/echo).
-        box_catchall = box_view and box is not None and agent_id == box
-        cursor_col = "delivery_read_id" if box_catchall else "last_read_id"
+        # Two cursors, one per delivery path, so the Stop-hook (box_view=True, the
+        # catch-all /deliver) can never consume messages out from under the agent's
+        # own interactive poll_convs (box_view=False) — the "reach-apple stall" where
+        # the hook ate every peer message the agent was polling for. To still avoid
+        # the engage-mode echo/answer-loop, the coupling is asymmetric:
+        #   * delivery (box_view)  reads + advances ONLY delivery_read_id.
+        #   * interactive (handle)  reads last_read_id, and advances BOTH cursors, so a
+        #                          message read explicitly is never re-notified by the
+        #                          hook. The delivery poll never touches last_read_id.
+        # The bare-box catch-all (agent_id == box) is the exception: its row is shared
+        # with a handle-less MCP session, so its two cursors stay fully independent (see
+        # the advance branch below).
+        cursor_col = "delivery_read_id" if box_view else "last_read_id"
         out = []
         async with self._wlock:
             cur = await self._db.execute(
@@ -201,10 +207,28 @@ class SqliteStore:
                 if not rows:
                     continue
                 if advance:
-                    await self._db.execute(
-                        f"UPDATE conv_members SET {cursor_col}=? "
-                        "WHERE conv_id=? AND agent_id=?",
-                        (rows[-1]["id"], m["conv_id"], agent_id))
+                    if box_view:
+                        await self._db.execute(
+                            "UPDATE conv_members SET delivery_read_id=? "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], m["conv_id"], agent_id))
+                    elif agent_id == box:
+                        # Bare-box catch-all: its row is shared with a handle-less MCP
+                        # session, so the two cursors stay fully independent (interactive
+                        # never touches the delivery cursor).
+                        await self._db.execute(
+                            "UPDATE conv_members SET last_read_id=? "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], m["conv_id"], agent_id))
+                    else:
+                        # Per-session handle: couple asymmetrically — an explicit read
+                        # also advances the delivery cursor so the Stop-hook won't
+                        # re-notify what was just read (no echo/answer-loop).
+                        await self._db.execute(
+                            "UPDATE conv_members SET last_read_id=?, "
+                            "delivery_read_id=max(delivery_read_id,?) "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], rows[-1]["id"], m["conv_id"], agent_id))
                 out.append({"conv": m["conv_id"], "messages": [
                     {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
                     for r in rows]})
