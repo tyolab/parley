@@ -11,7 +11,7 @@ from parley.transports.fake import FakeTransport
 
 
 @pytest.mark.asyncio
-async def test_say_nudges_notifier_and_delivery_dedupes_with_poll():
+async def test_say_nudges_notifier_and_deliver_poll_no_theft():
     store = await SqliteStore.connect(":memory:")
     transport = FakeTransport()
     app = build_app(store, transport)
@@ -35,7 +35,11 @@ async def test_say_nudges_notifier_and_delivery_dedupes_with_poll():
 
     d = await bob.deliver()
     assert [m["body"] for c in d for m in c["messages"]] == ["hello"]
+    # deliver advances ONLY the delivery cursor, so the interactive poll still
+    # receives the message (no theft — the reach-apple stall fix)...
     i = await bob.poll()
-    assert i == []  # shared cursor: deliver already consumed it, poll never echoes it
+    assert [m["body"] for c in i for m in c["messages"]] == ["hello"]
+    # ...and the poll advanced BOTH cursors, so a later deliver won't echo it.
+    assert await bob.deliver() == []
 
     await n.stop(); await alice.close(); await bob.close(); await store.close()
