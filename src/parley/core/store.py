@@ -1,4 +1,21 @@
+import re
 from typing import Protocol
+
+# A mention is '@' at the start or after whitespace, then a handle (box, box-slug,
+# or box-slug#N). Requiring the leading boundary stops email addresses (foo@bar.com)
+# from registering as mentions.
+_MENTION_RE = re.compile(r"(?:^|\s)@([A-Za-z0-9][\w.#-]*)")
+
+
+def extract_mentions(text: str) -> list[str]:
+    """The @handles mentioned in `text`, deduped and in first-seen order. A trailing
+    sentence dot is trimmed (so '@alice.' yields 'alice')."""
+    seen: list[str] = []
+    for m in _MENTION_RE.finditer(text or ""):
+        h = m.group(1).rstrip(".")
+        if h and h not in seen:
+            seen.append(h)
+    return seen
 
 
 def self_filter(agent_id: str, box: str | None, col: str,
@@ -33,9 +50,12 @@ class Store(Protocol):
     async def is_member(self, name: str, agent_id: str) -> bool: ...
     async def members(self, name: str) -> list[str]: ...
     async def poll(self, agent_id: str, room: str | None = None, box: str | None = None,
-                   box_view: bool = False) -> list[dict]: ...
+                   box_view: bool = False, limit: int | None = None,
+                   only_new: bool = False) -> list[dict]: ...
     async def peek(self, agent_id: str, room: str | None = None, box: str | None = None,
-                   box_view: bool = False) -> list[dict]: ...
+                   box_view: bool = False, limit: int | None = None,
+                   only_new: bool = False) -> list[dict]: ...
+    async def recent(self, agent_id: str, room: str, limit: int = 20) -> list[dict]: ...
     async def list_rooms(self, agent_id: str, box: str | None = None) -> list[dict]: ...
     async def all_rooms(self) -> list[dict]: ...
     async def box_rooms(self, box: str) -> list[str]: ...

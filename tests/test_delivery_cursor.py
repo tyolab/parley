@@ -67,6 +67,39 @@ async def test_hook_delivery_does_not_starve_interactive_poll(store):
     assert [m["body"] for o in p for m in o["messages"]] == ["hello from work3"]
 
 
+async def test_only_new_skips_hook_delivered_backlog_and_dedupes(store):
+    # A hook-driven session: the Stop-hook (box_view) delivers a backlog, then the
+    # session catches up with poll(only_new=True), which must NOT re-serve what the hook
+    # already gave it (reads past the delivery cursor too) — unlike the DEFAULT poll,
+    # which still returns everything (the no-theft invariant, covered above).
+    await store.create_room("r", "work3-agent#1")
+    await store.join("r", "work3-agent#2")
+    await store.say("r", "work3-agent#2", "m1")
+    await store.say("r", "work3-agent#2", "m2")
+    d = await store.poll("work3-agent#1", box="work3", box_view=True)  # hook delivers
+    assert [m["body"] for o in d for m in o["messages"]] == ["m1", "m2"]
+    # only_new: the hook already delivered m1,m2 -> nothing new to catch up on
+    assert await store.poll("work3-agent#1", box="work3", box_view=False,
+                            only_new=True) == []
+    # a genuinely new message -> only_new returns just it, and advances BOTH cursors
+    await store.say("r", "work3-agent#2", "m3")
+    i = await store.poll("work3-agent#1", box="work3", box_view=False, only_new=True)
+    assert [m["body"] for o in i for m in o["messages"]] == ["m3"]
+    # so the hook won't re-deliver m3 either (only_new advanced the delivery cursor)
+    assert await store.poll("work3-agent#1", box="work3", box_view=True) == []
+
+
+async def test_default_poll_still_reserves_hook_delivered_no_theft(store):
+    # Guard: the DEFAULT (only_new=False) is unchanged — after the hook delivers m1,
+    # the interactive poll STILL returns it. only_new must be strictly opt-in.
+    await store.create_room("r", "work3-agent#1")
+    await store.join("r", "work3-agent#2")
+    await store.say("r", "work3-agent#2", "m1")
+    assert len(await store.poll("work3-agent#1", box="work3", box_view=True)) == 1
+    i = await store.poll("work3-agent#1", box="work3", box_view=False)  # default
+    assert [m["body"] for o in i for m in o["messages"]] == ["m1"]
+
+
 async def test_bare_box_catchall_cursor_is_independent(store):
     # The bare-box catch-all (agent_id == box) keeps a delivery cursor independent
     # from the interactive cursor: it can share a conv_members row with a

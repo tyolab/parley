@@ -28,25 +28,41 @@ class Client:
     async def leave(self, name: str) -> dict:
         return (await self._http.post(f"/rooms/{name}/leave")).json()
 
-    async def say(self, name: str, body: str, kind: str = "say") -> dict:
-        return (await self._http.post(f"/rooms/{name}/messages",
-                                      json={"body": body, "kind": kind})).json()
+    async def say(self, name: str, body: str, kind: str = "say", join: bool = False) -> dict:
+        payload = {"body": body, "kind": kind}
+        if join:
+            payload["join"] = True
+        return (await self._http.post(f"/rooms/{name}/messages", json=payload)).json()
 
     async def members(self, name: str) -> list[str]:
         return (await self._http.get(f"/rooms/{name}/members")).json()["members"]
 
-    async def poll(self, room: str | None = None) -> list[dict]:
-        params = {"room": room} if room else None
+    @staticmethod
+    def _poll_params(room, limit):
+        p = {}
+        if room:
+            p["room"] = room
+        if limit is not None:
+            p["limit"] = limit
+        return p or None
+
+    async def poll(self, room: str | None = None, limit: int | None = None) -> list[dict]:
+        params = self._poll_params(room, limit)
         return (await self._http.get("/poll", params=params)).json()["conversations"]
 
-    async def peek(self, room: str | None = None) -> list[dict]:
-        params = {"room": room} if room else None
+    async def peek(self, room: str | None = None, limit: int | None = None) -> list[dict]:
+        params = self._poll_params(room, limit)
         return (await self._http.get("/peek", params=params)).json()["conversations"]
 
-    async def deliver(self, room: str | None = None) -> list[dict]:
+    async def deliver(self, room: str | None = None, limit: int | None = None) -> list[dict]:
         """Catch-all delivery poll (box_view). Used by the Stop-hook / notifier."""
-        params = {"room": room} if room else None
+        params = self._poll_params(room, limit)
         return (await self._http.get("/deliver", params=params)).json()["conversations"]
+
+    async def recent(self, room: str, limit: int = 20) -> list[dict]:
+        """My own recent messages in a room (newest first) — verify what landed."""
+        return (await self._http.get(f"/rooms/{room}/mine",
+                                     params={"limit": limit})).json()["messages"]
 
     async def listen(self, transport, rooms, on_nudge):
         """Subscribe to each room's nudge topic; call on_nudge(signal) per nudge.

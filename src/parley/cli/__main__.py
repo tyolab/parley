@@ -116,12 +116,17 @@ def _serve(args):
         mcp_port = None if args.no_mcp else (args.mcp_port or (args.port + 1))
         rest = build_app(store, transport, admin_token=args.token,
                          join_code=os.environ.get("PARLEY_JOIN_CODE"), mcp_port=mcp_port)
+        # timeout_graceful_shutdown: on SIGTERM, force-close lingering connections after
+        # 5s instead of waiting indefinitely for long-lived MCP/SSE streams to drain --
+        # that wait was turning every restart into a ~45s outage.
         servers = [uvicorn.Server(uvicorn.Config(
-            rest, host=args.host, port=args.port, log_level="info"))]
+            rest, host=args.host, port=args.port, log_level="info",
+            timeout_graceful_shutdown=5))]
         if not args.no_mcp:
             mcp_app = build_mcp_app(store, admin_token=args.token)
             servers.append(uvicorn.Server(uvicorn.Config(
-                mcp_app, host=args.host, port=mcp_port, log_level="info")))
+                mcp_app, host=args.host, port=mcp_port, log_level="info",
+                timeout_graceful_shutdown=5)))
         # Both servers run on one loop. Suppress each server's own signal capture --
         # with two servers the last handler installed would win, leaving the other
         # running forever on SIGINT/SIGTERM -- and drive a single shared shutdown so

@@ -1,9 +1,17 @@
 import httpx
 import pytest
 
+from parley.core.store import extract_mentions
 from parley.gateway.app import build_app
 from parley.stores.sqlite import SqliteStore
 from parley.transports.polling import PollingTransport
+
+
+def test_extract_mentions_basics():
+    assert extract_mentions("hi @alice and @bob-x#2, see @alice again") == ["alice", "bob-x#2"]
+    assert extract_mentions("email foo@bar.com is not a mention") == []
+    assert extract_mentions("@devmac-reach-ios: build it.") == ["devmac-reach-ios"]
+    assert extract_mentions("") == []
 
 
 @pytest.fixture
@@ -44,6 +52,89 @@ async def test_poll_named_unjoined_room_returns_error_not_empty(client):
     r = await client.get("/poll", params={"room": "r"}, headers=bob_headers())
     body = r.json()
     assert body["conversations"] == [] and "error" in body
+
+async def test_poll_unknown_room_errors_no_such_room(client):
+    r = await client.get("/poll", params={"room": "ghost"})
+    body = r.json()
+    assert body["conversations"] == []
+    assert "No conversation named 'ghost'" in body["error"]
+
+async def test_peek_unknown_room_errors_not_empty(client):
+    r = await client.get("/peek", params={"room": "ghost"})
+    body = r.json()
+    assert body["conversations"] == []
+    assert "No conversation named 'ghost'" in body["error"]
+
+async def test_peek_unjoined_existing_room_errors_join_first(client):
+    await client.post("/rooms", json={"name": "r"})  # alice creates + joins
+    r = await client.get("/peek", params={"room": "r"}, headers=bob_headers())
+    body = r.json()
+    assert body["conversations"] == []
+    assert "not a member" in body["error"].lower()
+
+async def test_say_alone_in_room_warns_sender(client):
+    await client.post("/rooms", json={"name": "solo"})  # alice is the only member
+    r = await client.post("/rooms/solo/messages", json={"body": "anyone?"})
+    body = r.json()
+    assert body["ok"] is True
+    assert "only member" in body.get("warning", "")
+
+async def test_say_with_other_members_has_no_warning(client):
+    await client.post("/rooms", json={"name": "r"})
+    await client.post("/rooms/r/join", headers=bob_headers())
+    r = await client.post("/rooms/r/messages", json={"body": "hi bob"})
+    body = r.json()
+    assert body["ok"] is True
+    assert "warning" not in body
+
+async def test_say_flags_unknown_mention_of_non_member(client):
+    await client.post("/rooms", json={"name": "r"})           # alice creates + joins
+    await client.post("/rooms/r/join", headers=bob_headers())  # bob joins
+    r = await client.post("/rooms/r/messages", json={"body": "@carol please take this"})
+    body = r.json()
+    assert body["ok"] is True
+    assert body["unknown_mentions"] == ["carol"]
+
+async def test_say_mention_of_member_not_flagged(client):
+    await client.post("/rooms", json={"name": "r"})
+    await client.post("/rooms/r/join", headers=bob_headers())
+    r = await client.post("/rooms/r/messages", json={"body": "@bob over to you"})
+    body = r.json()
+    assert body["ok"] is True
+    assert "unknown_mentions" not in body
+
+async def test_say_join_true_joins_and_sends(client):
+    await client.post("/rooms", json={"name": "r"})  # alice is a member; bob is not
+    r = await client.post("/rooms/r/messages",
+                          json={"body": "hi from bob", "join": True}, headers=bob_headers())
+    assert r.json()["ok"] is True
+    m = await client.get("/rooms/r/members")
+    assert "bob" in set(m.json()["members"])
+
+async def test_say_join_true_nonexistent_room_fails(client):
+    r = await client.post("/rooms/ghost/messages",
+                          json={"body": "x", "join": True}, headers=bob_headers())
+    body = r.json()
+    assert body["ok"] is False and "cannot join" in body["reason"]
+
+async def test_mine_returns_own_messages_newest_first(client):
+    await client.post("/rooms", json={"name": "r"})
+    await client.post("/rooms/r/messages", json={"body": "first"})
+    await client.post("/rooms/r/messages", json={"body": "second"})
+    r = await client.get("/rooms/r/mine")
+    assert [m["body"] for m in r.json()["messages"]] == ["second", "first"]
+
+async def test_mine_excludes_other_agents(client):
+    await client.post("/rooms", json={"name": "r"})
+    await client.post("/rooms/r/join", headers=bob_headers())
+    await client.post("/rooms/r/messages", json={"body": "from alice"})
+    await client.post("/rooms/r/messages", json={"body": "from bob"}, headers=bob_headers())
+    r = await client.get("/rooms/r/mine")  # alice's own only
+    assert [m["body"] for m in r.json()["messages"]] == ["from alice"]
+
+async def test_mine_unknown_room_errors(client):
+    r = await client.get("/rooms/ghost/mine")
+    assert "No conversation named 'ghost'" in r.json().get("error", "")
 
 async def test_members_and_who(client):
     await client.post("/rooms", json={"name": "r"})
