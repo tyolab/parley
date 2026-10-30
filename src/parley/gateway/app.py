@@ -1,12 +1,19 @@
+import asyncio
 import datetime
 import hmac
 import re
 
 from fastapi import FastAPI, HTTPException, Request
 
+from parley.core.store import extract_mentions
 from parley.gateway.identity import _bearer, resolve_identity
 
 _BOX_RE = r"[A-Za-z0-9._-]+"
+
+# Default per-room message cap for the read endpoints, so one busy room's backlog
+# can't overflow a caller's output budget. A caller can override with ?limit=N
+# (limit=0 means "no cap"). See store._collect for the drain-oldest/"more" semantics.
+DEFAULT_POLL_LIMIT = 50
 
 
 def build_app(store, transport, admin_token: str | None = None,
@@ -39,6 +46,21 @@ def build_app(store, transport, admin_token: str | None = None,
         if nonblank and not val.strip():
             raise HTTPException(status_code=400, detail=f"'{key}' must not be blank")
         return val
+
+    # Background nudge tasks are tracked so they are not garbage-collected mid-flight.
+    _nudge_tasks: set = set()
+
+    def _spawn_nudge(topic, signal):
+        """Fire-and-forget the push nudge with a hard timeout. Never awaited by the
+        request, so a slow/stuck/erroring transport cannot delay or fail a say."""
+        async def _run():
+            try:
+                await asyncio.wait_for(transport.publish(topic, signal), timeout=3.0)
+            except Exception:  # noqa: BLE001, S110 - nudge is best-effort
+                pass
+        t = asyncio.create_task(_run())
+        _nudge_tasks.add(t)
+        t.add_done_callback(_nudge_tasks.discard)
 
     @app.get("/healthz")
     async def healthz():
@@ -116,13 +138,34 @@ def build_app(store, transport, admin_token: str | None = None,
     async def say(request: Request, name: str, payload: dict):
         agent_id, _box, _is_admin = await _identify(request)
         body = _str_field(payload, "body")
+        # join=true: join-and-send in one call for a room the sender isn't in yet.
+        if payload.get("join") and not await store.is_member(name, agent_id):
+            j = await store.join(name, agent_id)
+            if not j.get("exists"):
+                return {"ok": False, "reason":
+                        f"No conversation named '{name}' exists; cannot join. Create it first."}
         res = await store.say(name, agent_id, body, payload.get("kind", "say"))
         if res.get("ok"):
+            # Fire-and-forget the push nudge: schedule it so a slow or stuck transport
+            # can never delay or fail the response. The row is already committed, so a
+            # nudge that errors/hangs must not turn a successful send into an ambiguous
+            # 500 (which is what made a retry's safety unknowable).
             at = datetime.datetime.now(datetime.UTC).isoformat()
-            try:
-                await transport.publish(name, {"room": name, "from": agent_id, "at": at})
-            except Exception:  # noqa: BLE001, S110 - nudge is best-effort
-                pass
+            _spawn_nudge(name, {"room": name, "from": agent_id, "at": at})
+            members = await store.members(name)
+            # Warn a sender who is alone in the room: the message is stored but nobody
+            # else will receive it. A send into the void is otherwise invisible.
+            if not [m for m in members if m != agent_id]:
+                res = {**res, "warning":
+                       f"You are the only member of '{name}'. No one else will receive "
+                       f"this until someone joins."}
+            # Flag @mentions of agents who are NOT in this room: the message posted, but
+            # the person it was addressed to will never receive it (the mention-to-a-
+            # non-member failure that a healthy member count does not catch).
+            mset = set(members)
+            unknown = [h for h in extract_mentions(body) if h != agent_id and h not in mset]
+            if unknown:
+                res = {**res, "unknown_mentions": unknown}
         return res
 
     @app.get("/rooms/{name}/members")
@@ -130,24 +173,61 @@ def build_app(store, transport, admin_token: str | None = None,
         await _identify(request)
         return {"members": await store.members(name)}
 
-    @app.get("/poll")
-    async def poll(request: Request, room: str | None = None):
-        agent_id, box, _is_admin = await _identify(request)
-        if room and not await store.is_member(room, agent_id):
+    @app.get("/rooms/{name}/mine")
+    async def mine(request: Request, name: str, limit: int = 20):
+        # Read back my OWN recent messages in a room, so after an ambiguous send error
+        # I can see what actually landed before deciding to retry (peek/poll never
+        # return my own messages).
+        agent_id, _box, _is_admin = await _identify(request)
+        block = await _room_block(agent_id, name)
+        if block:
+            return block
+        return {"messages": await store.recent(agent_id, name, limit)}
+
+    async def _room_block(agent_id, room):
+        """For a NAMED read: an error payload if the room is unknown or the caller is
+        not a member (distinguishing the two), else None. So a named poll/peek says
+        "no such room" vs "join first" instead of an empty result that looks the same
+        as "nothing unread"."""
+        if not room:
+            return None
+        if await store.get_room(room) is None:
             return {"conversations": [],
-                    "error": f"You are not a member of '{room}' (or it does not exist). "
-                             f"Use /rooms or list to find the right room, then join."}
-        return {"conversations": await store.poll(agent_id, room, box=box)}
+                    "error": f"No conversation named '{room}' exists. "
+                             f"Use /rooms-all to list rooms, or create it first."}
+        if not await store.is_member(room, agent_id):
+            return {"conversations": [],
+                    "error": f"You are not a member of '{room}'. Join it first."}
+        return None
+
+    @app.get("/poll")
+    async def poll(request: Request, room: str | None = None, limit: int | None = None,
+                   only_new: bool = False):
+        agent_id, box, _is_admin = await _identify(request)
+        block = await _room_block(agent_id, room)
+        if block:
+            return block
+        lim = DEFAULT_POLL_LIMIT if limit is None else limit
+        return {"conversations": await store.poll(agent_id, room, box=box, limit=lim,
+                                                  only_new=only_new)}
 
     @app.get("/deliver")
-    async def deliver(request: Request, room: str | None = None):
+    async def deliver(request: Request, room: str | None = None, limit: int | None = None):
         agent_id, box, _is_admin = await _identify(request)
-        return {"conversations": await store.poll(agent_id, room, box=box, box_view=True)}
+        lim = DEFAULT_POLL_LIMIT if limit is None else limit
+        return {"conversations": await store.poll(agent_id, room, box=box,
+                                                  box_view=True, limit=lim)}
 
     @app.get("/peek")
-    async def peek(request: Request, room: str | None = None):
+    async def peek(request: Request, room: str | None = None, limit: int | None = None,
+                   only_new: bool = False):
         agent_id, box, _is_admin = await _identify(request)
-        return {"conversations": await store.peek(agent_id, room, box=box)}
+        block = await _room_block(agent_id, room)
+        if block:
+            return block
+        lim = DEFAULT_POLL_LIMIT if limit is None else limit
+        return {"conversations": await store.peek(agent_id, room, box=box, limit=lim,
+                                                  only_new=only_new)}
 
     @app.get("/rooms")
     async def list_rooms(request: Request):

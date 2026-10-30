@@ -49,6 +49,10 @@ class PostgresStore:
     def __init__(self, pool):
         self._pool = pool
         self.on_message = None
+        # Bound how long a say waits for the per-room advisory lock. On timeout the
+        # transaction aborts BEFORE the insert (nothing written), so the send fails
+        # cleanly and is safe to retry instead of hanging into an ambiguous error.
+        self._say_lock_timeout_ms = 3000
 
     @classmethod
     async def connect(cls, dsn, schema="parley"):
@@ -120,11 +124,24 @@ class PostgresStore:
             if not await c.fetchval(
                     "SELECT 1 FROM conv_members WHERE conv_id=$1 AND agent_id=$2", name, agent_id):
                 return {"ok": False, "reason": "not a member — join first"}
-            async with c.transaction():
-                await c.execute("SELECT pg_advisory_xact_lock(hashtext($1))", name)
-                mid = await c.fetchval(
-                    "INSERT INTO conv_messages(conv_id,from_agent,body,kind) "
-                    "VALUES($1,$2,$3,$4) RETURNING id", name, agent_id, body, kind)
+            try:
+                async with c.transaction():
+                    # Fail fast if the per-room advisory lock is contended: the timeout
+                    # aborts the txn BEFORE the insert, so a busy room can never turn a
+                    # send into an ambiguous hang (did it commit?). lock_timeout is a
+                    # trusted int (ms), not user input, so formatting it is injection-safe.
+                    await c.execute(f"SET LOCAL lock_timeout = {int(self._say_lock_timeout_ms)}")
+                    await c.execute("SELECT pg_advisory_xact_lock(hashtext($1))", name)
+                    mid = await c.fetchval(
+                        "INSERT INTO conv_messages(conv_id,from_agent,body,kind) "
+                        "VALUES($1,$2,$3,$4) RETURNING id", name, agent_id, body, kind)
+            except asyncpg.PostgresError as e:
+                # 55P03 = lock_not_available (lock_timeout fired). Nothing committed; the
+                # caller can retry without risking a duplicate.
+                if getattr(e, "sqlstate", None) == "55P03":
+                    return {"ok": False, "retry": True, "reason":
+                            "room is busy (lock timeout); nothing was written, safe to retry"}
+                raise
         if self.on_message:
             try:
                 res = self.on_message(name, agent_id, mid)
@@ -158,17 +175,38 @@ class PostgresStore:
             return bool(await c.fetchval(
                 "SELECT 1 FROM agent_tokens WHERE box=$1 LIMIT 1", box))
 
-    async def _collect(self, agent_id, room, box, advance, box_view):
+    async def _collect(self, agent_id, room, box, advance, box_view, limit=None,
+                       only_new=False):
         # box_view reuses $3 (agent) in the predicate exactly like board._self_filter;
-        # extra is empty and $4 is never referenced.
+        # extra is empty and $4 is used below only as the per-room LIMIT.
         pred, _extra = self_filter(agent_id, box, "from_agent", "$3", "$4", box_view=box_view)
-        # The separate delivery cursor is ONLY for the bare-box catch-all hook (a
-        # distinct identity that can collide with a handle-less MCP session on the
-        # same conv_members row). A per-session handle's hook shares its own read
-        # cursor with its MCP polls, so a message seen via either path is never
-        # re-surfaced by the other (was: box_view alone → double-delivery/echo).
-        box_catchall = box_view and box is not None and agent_id == box
-        cursor_col = "delivery_read_id" if box_catchall else "last_read_id"
+        # Per-room cap: drain the OLDEST `limit` unread, leave the rest (cursor only
+        # advances to the last RETURNED message), and tag the room with "more": N so a
+        # busy backlog can't blow past the MCP output cap. limit<=0/None => no cap.
+        cap = limit if (limit and limit > 0) else None
+        fetch_lim = (cap + 1) if cap else None   # Postgres: LIMIT NULL means no limit
+        # Two cursors, one per delivery path, so the Stop-hook (box_view=True, the
+        # catch-all /deliver) can never consume messages out from under the agent's
+        # own interactive poll_convs (box_view=False) — the "reach-apple stall" where
+        # the hook ate every peer message the agent was polling for. To still avoid
+        # the engage-mode echo/answer-loop, the coupling is asymmetric:
+        #   * delivery (box_view)  reads + advances ONLY delivery_read_id.
+        #   * interactive (handle)  reads last_read_id, and advances BOTH cursors, so a
+        #                          message read explicitly is never re-notified by the
+        #                          hook. The delivery poll never touches last_read_id.
+        # The bare-box catch-all (agent_id == box) is the exception: its row is shared
+        # with a handle-less MCP session, so its two cursors stay fully independent (see
+        # the advance branch below).
+        # only_new (interactive opt-in): read from the furthest of the two cursors, i.e.
+        # "what neither the hook nor a prior poll has already given me", so a hook-driven
+        # session is not re-served a backlog the Stop-hook already delivered. The DEFAULT
+        # stays last_read_id so the no-theft invariant is intact.
+        if box_view:
+            cursor_col = "delivery_read_id"
+        elif only_new:
+            cursor_col = "GREATEST(last_read_id, delivery_read_id)"
+        else:
+            cursor_col = "last_read_id"
         out = []
         # Only a cursor-advancing poll needs to serialize (FOR UPDATE) on the member
         # rows; a read-only peek takes no lock so it never blocks concurrent polls.
@@ -181,25 +219,68 @@ class PostgresStore:
             for m in members:
                 rows = await c.fetch(
                     "SELECT id,from_agent,body,created_at FROM conv_messages "
-                    f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id",
-                    m["conv_id"], m["cursor"], agent_id)
+                    f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id LIMIT $4::int",
+                    m["conv_id"], m["cursor"], agent_id, fetch_lim)
                 if not rows:
                     continue
+                more = 0
+                if cap and len(rows) > cap:
+                    rows = rows[:cap]
+                    more = int(await c.fetchval(
+                        f"SELECT count(*) FROM conv_messages "
+                        f"WHERE conv_id=$1 AND id>$2 AND {pred}",
+                        m["conv_id"], rows[-1]["id"], agent_id))
                 if advance:
-                    await c.execute(
-                        f"UPDATE conv_members SET {cursor_col}=$3 "
-                        "WHERE conv_id=$1 AND agent_id=$2",
-                        m["conv_id"], agent_id, rows[-1]["id"])
-                out.append({"conv": m["conv_id"], "messages": [
+                    if box_view:
+                        await c.execute(
+                            "UPDATE conv_members SET delivery_read_id=$3 "
+                            "WHERE conv_id=$1 AND agent_id=$2",
+                            m["conv_id"], agent_id, rows[-1]["id"])
+                    elif agent_id == box:
+                        # Bare-box catch-all: its row is shared with a handle-less MCP
+                        # session, so the two cursors stay fully independent (interactive
+                        # never touches the delivery cursor).
+                        await c.execute(
+                            "UPDATE conv_members SET last_read_id=$3 "
+                            "WHERE conv_id=$1 AND agent_id=$2",
+                            m["conv_id"], agent_id, rows[-1]["id"])
+                    else:
+                        # Per-session handle: couple asymmetrically — an explicit read
+                        # also advances the delivery cursor so the Stop-hook won't
+                        # re-notify what was just read (no echo/answer-loop).
+                        await c.execute(
+                            "UPDATE conv_members SET last_read_id=$3, "
+                            "delivery_read_id=GREATEST(delivery_read_id,$3) "
+                            "WHERE conv_id=$1 AND agent_id=$2",
+                            m["conv_id"], agent_id, rows[-1]["id"])
+                entry = {"conv": m["conv_id"], "messages": [
                     {"from": r["from_agent"], "body": r["body"],
-                     "at": _iso(r["created_at"])} for r in rows]})
+                     "at": _iso(r["created_at"])} for r in rows]}
+                if more:
+                    entry["more"] = more
+                out.append(entry)
         return out
 
-    async def poll(self, agent_id, room=None, box=None, box_view=False):
-        return await self._collect(agent_id, room, box, advance=True, box_view=box_view)
+    async def poll(self, agent_id, room=None, box=None, box_view=False, limit=None,
+                   only_new=False):
+        return await self._collect(agent_id, room, box, advance=True,
+                                   box_view=box_view, limit=limit, only_new=only_new)
 
-    async def peek(self, agent_id, room=None, box=None, box_view=False):
-        return await self._collect(agent_id, room, box, advance=False, box_view=box_view)
+    async def peek(self, agent_id, room=None, box=None, box_view=False, limit=None,
+                   only_new=False):
+        return await self._collect(agent_id, room, box, advance=False,
+                                   box_view=box_view, limit=limit, only_new=only_new)
+
+    async def recent(self, agent_id, room, limit=20):
+        # The caller's OWN latest messages in a room (newest first), so a sender can
+        # verify what landed after an ambiguous error. peek/poll never show own messages.
+        lim = limit if (limit and limit > 0) else 20
+        async with self._pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT id,body,created_at FROM conv_messages "
+                "WHERE conv_id=$1 AND from_agent=$2 ORDER BY id DESC LIMIT $3",
+                room, agent_id, lim)
+        return [{"id": r["id"], "body": r["body"], "at": _iso(r["created_at"])} for r in rows]
 
     async def list_rooms(self, agent_id, box=None):
         pred, _extra = self_filter(agent_id, box, "x.from_agent", "$1", "$2")

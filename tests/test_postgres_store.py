@@ -70,3 +70,35 @@ async def test_peek_and_directory():
         assert set(await s.box_rooms("work3")) == {"r2"}
     finally:
         await s.close()
+
+
+async def test_say_lock_timeout_fails_cleanly_without_writing():
+    # Under same-room contention the per-room advisory lock used to make a say hang
+    # until the client timed out, leaving it unknowable whether the row committed.
+    # With lock_timeout the acquisition fails FAST and BEFORE the insert, so the send
+    # returns a clean retryable error and nothing is written.
+    import asyncpg
+
+    from tests.pg_util import DSN
+    s = await fresh_store()
+    try:
+        s._say_lock_timeout_ms = 100
+        await s.create_room("r", "alice")
+        await s.join("r", "bob")
+        # Hold the room's advisory lock from a separate session/txn.
+        holder = await asyncpg.connect(DSN)
+        tx = holder.transaction()
+        await tx.start()
+        await holder.execute("SELECT pg_advisory_xact_lock(hashtext($1))", "r")
+        try:
+            res = await s.say("r", "bob", "contended")
+            assert res["ok"] is False and res.get("retry") is True
+            assert await s.recent("bob", "r", 10) == []   # nothing written
+        finally:
+            await tx.rollback()   # release the lock
+            await holder.close()
+        # once the lock is free, the same send succeeds (and is the only copy).
+        assert (await s.say("r", "bob", "contended"))["ok"] is True
+        assert [m["body"] for m in await s.recent("bob", "r", 10)] == ["contended"]
+    finally:
+        await s.close()
