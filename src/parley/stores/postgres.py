@@ -49,6 +49,10 @@ class PostgresStore:
     def __init__(self, pool):
         self._pool = pool
         self.on_message = None
+        # Bound how long a say waits for the per-room advisory lock. On timeout the
+        # transaction aborts BEFORE the insert (nothing written), so the send fails
+        # cleanly and is safe to retry instead of hanging into an ambiguous error.
+        self._say_lock_timeout_ms = 3000
 
     @classmethod
     async def connect(cls, dsn, schema="parley"):
@@ -120,11 +124,24 @@ class PostgresStore:
             if not await c.fetchval(
                     "SELECT 1 FROM conv_members WHERE conv_id=$1 AND agent_id=$2", name, agent_id):
                 return {"ok": False, "reason": "not a member — join first"}
-            async with c.transaction():
-                await c.execute("SELECT pg_advisory_xact_lock(hashtext($1))", name)
-                mid = await c.fetchval(
-                    "INSERT INTO conv_messages(conv_id,from_agent,body,kind) "
-                    "VALUES($1,$2,$3,$4) RETURNING id", name, agent_id, body, kind)
+            try:
+                async with c.transaction():
+                    # Fail fast if the per-room advisory lock is contended: the timeout
+                    # aborts the txn BEFORE the insert, so a busy room can never turn a
+                    # send into an ambiguous hang (did it commit?). lock_timeout is a
+                    # trusted int (ms), not user input, so formatting it is injection-safe.
+                    await c.execute(f"SET LOCAL lock_timeout = {int(self._say_lock_timeout_ms)}")
+                    await c.execute("SELECT pg_advisory_xact_lock(hashtext($1))", name)
+                    mid = await c.fetchval(
+                        "INSERT INTO conv_messages(conv_id,from_agent,body,kind) "
+                        "VALUES($1,$2,$3,$4) RETURNING id", name, agent_id, body, kind)
+            except asyncpg.PostgresError as e:
+                # 55P03 = lock_not_available (lock_timeout fired). Nothing committed; the
+                # caller can retry without risking a duplicate.
+                if getattr(e, "sqlstate", None) == "55P03":
+                    return {"ok": False, "retry": True, "reason":
+                            "room is busy (lock timeout); nothing was written, safe to retry"}
+                raise
         if self.on_message:
             try:
                 res = self.on_message(name, agent_id, mid)
