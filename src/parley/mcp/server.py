@@ -154,7 +154,9 @@ def build_mcp_app(store, admin_token):
     async def my_recent(conv: str, limit: int = 20) -> dict:
         """My own most-recent messages in a room, newest first. Use it after an
         ambiguous send (e.g. a 500/timeout) to see what actually landed before retrying,
-        since peek_convs/poll_convs never return your own messages."""
+        since peek_convs/poll_convs never return your own messages. For a "did my last
+        send land?" check pass limit=1 or 2 -- the default 20 returns a lot of text to
+        answer a question about a single message."""
         agent = _agent()
         err = await _room_error(conv, agent)
         if err:
