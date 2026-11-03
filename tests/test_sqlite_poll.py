@@ -43,6 +43,50 @@ async def test_poll_single_room_filter(store):
     out = await store.poll("bob", room="r1")
     assert [o["conv"] for o in out] == ["r1"]
 
+async def test_poll_caps_per_room_and_marks_more(store):
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(5):
+        await store.say("r", "alice", f"m{i}")
+    # cap of 2 -> oldest 2 first, with an exact "more" of the remaining
+    out = await store.poll("bob", limit=2)
+    assert [m["body"] for m in out[0]["messages"]] == ["m0", "m1"]
+    assert out[0]["more"] == 3
+    # next poll drains the next batch (cursor advanced only to what was returned)
+    out = await store.poll("bob", limit=2)
+    assert [m["body"] for m in out[0]["messages"]] == ["m2", "m3"]
+    assert out[0]["more"] == 1
+    # last batch: no "more" marker when the room is fully drained
+    out = await store.poll("bob", limit=2)
+    assert [m["body"] for m in out[0]["messages"]] == ["m4"]
+    assert "more" not in out[0]
+    assert await store.poll("bob", limit=2) == []
+
+
+async def test_poll_uncapped_by_default(store):
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(5):
+        await store.say("r", "alice", f"m{i}")
+    out = await store.poll("bob")  # limit=None -> no cap, no marker
+    assert len(out[0]["messages"]) == 5
+    assert "more" not in out[0]
+
+
+async def test_peek_cap_does_not_advance(store):
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(3):
+        await store.say("r", "alice", f"m{i}")
+    out = await store.peek("bob", limit=2)
+    assert [m["body"] for m in out[0]["messages"]] == ["m0", "m1"]
+    assert out[0]["more"] == 1
+    # peek again -> identical, cursor untouched
+    out = await store.peek("bob", limit=2)
+    assert [m["body"] for m in out[0]["messages"]] == ["m0", "m1"]
+    assert out[0]["more"] == 1
+
+
 async def test_bare_box_hears_own_sessions_by_default(store):
     # CORRECTED semantics: distinct identities hear each other, so bare-box 'work3'
     # DOES hear its same-box session by default (box_view defaults False).

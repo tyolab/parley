@@ -102,9 +102,17 @@ class SqliteStore:
         if not await cur.fetchone():
             return {"joined": False, "exists": False}
         async with self._wlock:
+            # Start the DELIVERY cursor at the room's current head so the Stop hook does
+            # NOT push the whole backlog at a (re-)joiner. This keys on head-at-join-time,
+            # not "is this a new member", so a re-join after a dropped membership is
+            # covered too. The INTERACTIVE cursor stays at 0 so a deliberate poll can
+            # still catch up on history (or poll_convs(only_new=true) for just the new).
+            hc = await self._db.execute(
+                "SELECT COALESCE(MAX(id),0) AS h FROM conv_messages WHERE conv_id=?", (name,))
+            head = (await hc.fetchone())["h"]
             await self._db.execute(
-                "INSERT OR IGNORE INTO conv_members(conv_id,agent_id,joined_at) VALUES(?,?,?)",
-                (name, agent_id, _now()))
+                "INSERT OR IGNORE INTO conv_members(conv_id,agent_id,joined_at,delivery_read_id) "
+                "VALUES(?,?,?,?)", (name, agent_id, _now(), head))
             await self._db.commit()
         return {"joined": True, "exists": True}
 
@@ -175,16 +183,37 @@ class SqliteStore:
             "SELECT 1 FROM agent_tokens WHERE box=? LIMIT 1", (box,))
         return (await cur.fetchone()) is not None
 
-    async def _collect(self, agent_id, room, box, advance, box_view):
+    async def _collect(self, agent_id, room, box, advance, box_view, limit=None,
+                       only_new=False):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
                                    box_view=box_view)
-        # The separate delivery cursor is ONLY for the bare-box catch-all hook (a
-        # distinct identity that can collide with a handle-less MCP session on the
-        # same conv_members row). A per-session handle's hook shares its own read
-        # cursor with its MCP polls, so a message seen via either path is never
-        # re-surfaced by the other (was: box_view alone → double-delivery/echo).
-        box_catchall = box_view and box is not None and agent_id == box
-        cursor_col = "delivery_read_id" if box_catchall else "last_read_id"
+        # Per-room cap: drain the OLDEST `limit` unread, leave the rest (cursor only
+        # advances to the last RETURNED message), and tag the room with "more": N so a
+        # busy backlog can't blow past the MCP output cap. limit<=0/None => no cap.
+        cap = limit if (limit and limit > 0) else None
+        fetch_lim = (cap + 1) if cap else -1   # SQLite: a negative LIMIT means no limit
+        # Two cursors, one per delivery path, so the Stop-hook (box_view=True, the
+        # catch-all /deliver) can never consume messages out from under the agent's
+        # own interactive poll_convs (box_view=False) — the "reach-apple stall" where
+        # the hook ate every peer message the agent was polling for. To still avoid
+        # the engage-mode echo/answer-loop, the coupling is asymmetric:
+        #   * delivery (box_view)  reads + advances ONLY delivery_read_id.
+        #   * interactive (handle)  reads last_read_id, and advances BOTH cursors, so a
+        #                          message read explicitly is never re-notified by the
+        #                          hook. The delivery poll never touches last_read_id.
+        # The bare-box catch-all (agent_id == box) is the exception: its row is shared
+        # with a handle-less MCP session, so its two cursors stay fully independent (see
+        # the advance branch below).
+        # only_new (interactive opt-in): read from the furthest of the two cursors, i.e.
+        # "what neither the hook nor a prior poll has already given me". This is the view
+        # a hook-driven session wants so a backlog the Stop-hook already delivered is not
+        # re-served; the DEFAULT stays last_read_id so the no-theft invariant is intact.
+        if box_view:
+            cursor_col = "delivery_read_id"
+        elif only_new:
+            cursor_col = "max(last_read_id, delivery_read_id)"
+        else:
+            cursor_col = "last_read_id"
         out = []
         async with self._wlock:
             cur = await self._db.execute(
@@ -193,30 +222,113 @@ class SqliteStore:
                 (agent_id, room, room))
             members = await cur.fetchall()
             for m in members:
+                if box_view:
+                    # Hook delivery is bounded and one-shot: show at most `dcap` of the
+                    # NEWEST unread and catch the delivery cursor up to the room HEAD, so a
+                    # backlog floods a turn at most once (never the whole history, never
+                    # drained over many turns). Skipped messages stay readable via the
+                    # interactive poll (last_read_id is untouched here). dcap is always set
+                    # (default 10) so the hook can never dump an unbounded backlog.
+                    dcap = cap or 10
+                    args = {"conv": m["conv_id"], "last": m["cursor"],
+                            "agent": agent_id, "box": box}
+                    nc = await self._db.execute(
+                        "SELECT id,from_agent,body,created_at FROM conv_messages "
+                        f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id DESC LIMIT :lim",
+                        {**args, "lim": dcap})
+                    nrows = await nc.fetchall()
+                    if not nrows:
+                        continue
+                    tc = await self._db.execute(
+                        f"SELECT count(*) AS n FROM conv_messages "
+                        f"WHERE conv_id=:conv AND id>:last AND {pred}", args)
+                    total = int((await tc.fetchone())["n"])
+                    nrows = list(reversed(nrows))   # newest `dcap`, chronological order
+                    bmore = max(0, total - len(nrows))
+                    if advance:
+                        hc = await self._db.execute(
+                            "SELECT COALESCE(MAX(id),0) AS h FROM conv_messages WHERE conv_id=?",
+                            (m["conv_id"],))
+                        head = (await hc.fetchone())["h"]
+                        await self._db.execute(
+                            "UPDATE conv_members SET delivery_read_id=? "
+                            "WHERE conv_id=? AND agent_id=?", (head, m["conv_id"], agent_id))
+                    entry = {"conv": m["conv_id"], "messages": [
+                        {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
+                        for r in nrows]}
+                    if bmore:
+                        entry["more"] = bmore
+                    out.append(entry)
+                    continue
                 q = ("SELECT id,from_agent,body,created_at FROM conv_messages "
-                     f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id")
+                     f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id LIMIT :lim")
                 mc = await self._db.execute(q, {"conv": m["conv_id"], "last": m["cursor"],
-                                                "agent": agent_id, "box": box})
+                                                "agent": agent_id, "box": box, "lim": fetch_lim})
                 rows = await mc.fetchall()
                 if not rows:
                     continue
+                more = 0
+                if cap and len(rows) > cap:
+                    rows = rows[:cap]
+                    mc2 = await self._db.execute(
+                        f"SELECT count(*) AS n FROM conv_messages "
+                        f"WHERE conv_id=:conv AND id>:last AND {pred}",
+                        {"conv": m["conv_id"], "last": rows[-1]["id"],
+                         "agent": agent_id, "box": box})
+                    more = int((await mc2.fetchone())["n"])
                 if advance:
-                    await self._db.execute(
-                        f"UPDATE conv_members SET {cursor_col}=? "
-                        "WHERE conv_id=? AND agent_id=?",
-                        (rows[-1]["id"], m["conv_id"], agent_id))
-                out.append({"conv": m["conv_id"], "messages": [
+                    if box_view:
+                        await self._db.execute(
+                            "UPDATE conv_members SET delivery_read_id=? "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], m["conv_id"], agent_id))
+                    elif agent_id == box:
+                        # Bare-box catch-all: its row is shared with a handle-less MCP
+                        # session, so the two cursors stay fully independent (interactive
+                        # never touches the delivery cursor).
+                        await self._db.execute(
+                            "UPDATE conv_members SET last_read_id=? "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], m["conv_id"], agent_id))
+                    else:
+                        # Per-session handle: couple asymmetrically — an explicit read
+                        # also advances the delivery cursor so the Stop-hook won't
+                        # re-notify what was just read (no echo/answer-loop).
+                        await self._db.execute(
+                            "UPDATE conv_members SET last_read_id=?, "
+                            "delivery_read_id=max(delivery_read_id,?) "
+                            "WHERE conv_id=? AND agent_id=?",
+                            (rows[-1]["id"], rows[-1]["id"], m["conv_id"], agent_id))
+                entry = {"conv": m["conv_id"], "messages": [
                     {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
-                    for r in rows]})
+                    for r in rows]}
+                if more:
+                    entry["more"] = more
+                out.append(entry)
             if advance:
                 await self._db.commit()
         return out
 
-    async def poll(self, agent_id, room=None, box=None, box_view=False):
-        return await self._collect(agent_id, room, box, advance=True, box_view=box_view)
+    async def poll(self, agent_id, room=None, box=None, box_view=False, limit=None,
+                   only_new=False):
+        return await self._collect(agent_id, room, box, advance=True,
+                                   box_view=box_view, limit=limit, only_new=only_new)
 
-    async def peek(self, agent_id, room=None, box=None, box_view=False):
-        return await self._collect(agent_id, room, box, advance=False, box_view=box_view)
+    async def peek(self, agent_id, room=None, box=None, box_view=False, limit=None,
+                   only_new=False):
+        return await self._collect(agent_id, room, box, advance=False,
+                                   box_view=box_view, limit=limit, only_new=only_new)
+
+    async def recent(self, agent_id, room, limit=20):
+        # The caller's OWN latest messages in a room (newest first), so a sender can
+        # verify what landed after an ambiguous error. peek/poll never show own messages.
+        lim = limit if (limit and limit > 0) else 20
+        cur = await self._db.execute(
+            "SELECT id,body,created_at FROM conv_messages "
+            "WHERE conv_id=? AND from_agent=? ORDER BY id DESC LIMIT ?",
+            (room, agent_id, lim))
+        return [{"id": r["id"], "body": r["body"], "at": r["created_at"]}
+                for r in await cur.fetchall()]
 
     async def list_rooms(self, agent_id, box=None):
         pred, _extra = self_filter(agent_id, box, "x.from_agent", ":agent", ":box")
