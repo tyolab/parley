@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import hmac
+import os
 import re
 
 from fastapi import FastAPI, HTTPException, Request
@@ -14,6 +15,19 @@ _BOX_RE = r"[A-Za-z0-9._-]+"
 # can't overflow a caller's output budget. A caller can override with ?limit=N
 # (limit=0 means "no cap"). See store._collect for the drain-oldest/"more" semantics.
 DEFAULT_POLL_LIMIT = 50
+
+# The Stop-hook catch-all delivery (/deliver) is tightly bounded per room: at most this
+# many of the NEWEST unread, one-shot (the delivery cursor jumps to head). This stops a
+# backlog from flooding an agent's turn — and the user's terminal scrollback — regardless
+# of what caused it (first join, re-join, or a reboot-fresh session).
+DELIVER_CAP = 10
+
+# Rooms excluded from Stop-hook push entirely: drop-boxes that agents post TO but should
+# never RECEIVE via the hook (e.g. the feedback room — chatty, and nobody needs it pushed).
+# They remain fully readable via an explicit poll/peek. Comma-separated, override via env.
+NO_PUSH_ROOMS = {r.strip() for r in
+                 os.environ.get("PARLEY_NO_PUSH_ROOMS", "parley-feedback").split(",")
+                 if r.strip()}
 
 
 def build_app(store, transport, admin_token: str | None = None,
@@ -214,9 +228,12 @@ def build_app(store, transport, admin_token: str | None = None,
     @app.get("/deliver")
     async def deliver(request: Request, room: str | None = None, limit: int | None = None):
         agent_id, box, _is_admin = await _identify(request)
-        lim = DEFAULT_POLL_LIMIT if limit is None else limit
-        return {"conversations": await store.poll(agent_id, room, box=box,
-                                                  box_view=True, limit=lim)}
+        lim = DELIVER_CAP if limit is None else limit
+        convs = await store.poll(agent_id, room, box=box, box_view=True, limit=lim)
+        # No-push rooms are posted to but never delivered via the hook.
+        if NO_PUSH_ROOMS:
+            convs = [c for c in convs if c.get("conv") not in NO_PUSH_ROOMS]
+        return {"conversations": convs}
 
     @app.get("/peek")
     async def peek(request: Request, room: str | None = None, limit: int | None = None,

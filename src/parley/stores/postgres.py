@@ -97,9 +97,15 @@ class PostgresStore:
         async with self._pool.acquire() as c:
             if not await c.fetchval("SELECT 1 FROM conversations WHERE id=$1", name):
                 return {"joined": False, "exists": False}
+            # Start the DELIVERY cursor at the room's current head so the Stop hook does
+            # NOT push the whole backlog at a (re-)joiner. Keys on head-at-join-time, so a
+            # re-join after a dropped membership is covered. The INTERACTIVE cursor stays
+            # at 0 so a deliberate poll can still catch up (or only_new=true for just new).
+            head = await c.fetchval(
+                "SELECT COALESCE(MAX(id),0) FROM conv_messages WHERE conv_id=$1", name)
             await c.execute(
-                "INSERT INTO conv_members(conv_id,agent_id) VALUES($1,$2) "
-                "ON CONFLICT (conv_id,agent_id) DO NOTHING", name, agent_id)
+                "INSERT INTO conv_members(conv_id,agent_id,delivery_read_id) VALUES($1,$2,$3) "
+                "ON CONFLICT (conv_id,agent_id) DO NOTHING", name, agent_id, head)
         return {"joined": True, "exists": True}
 
     async def leave(self, name, agent_id):
@@ -217,6 +223,39 @@ class PostgresStore:
                 "WHERE agent_id=$1 AND ($2::text IS NULL OR conv_id=$2) "
                 f"ORDER BY conv_id{lock}", agent_id, room)
             for m in members:
+                if box_view:
+                    # Hook delivery is bounded and one-shot: show at most `dcap` of the
+                    # NEWEST unread and catch the delivery cursor up to the room HEAD, so a
+                    # backlog floods a turn at most once (never the whole history, never
+                    # drained over many turns). Skipped messages stay readable via the
+                    # interactive poll (last_read_id is untouched). dcap is always set.
+                    dcap = cap or 10
+                    nrows = await c.fetch(
+                        "SELECT id,from_agent,body,created_at FROM conv_messages "
+                        f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id DESC LIMIT $4::int",
+                        m["conv_id"], m["cursor"], agent_id, dcap)
+                    if not nrows:
+                        continue
+                    total = int(await c.fetchval(
+                        f"SELECT count(*) FROM conv_messages "
+                        f"WHERE conv_id=$1 AND id>$2 AND {pred}",
+                        m["conv_id"], m["cursor"], agent_id))
+                    nrows = list(reversed(nrows))   # newest `dcap`, chronological order
+                    bmore = max(0, total - len(nrows))
+                    if advance:
+                        head = await c.fetchval(
+                            "SELECT COALESCE(MAX(id),0) FROM conv_messages WHERE conv_id=$1",
+                            m["conv_id"])
+                        await c.execute(
+                            "UPDATE conv_members SET delivery_read_id=$3 "
+                            "WHERE conv_id=$1 AND agent_id=$2", m["conv_id"], agent_id, head)
+                    entry = {"conv": m["conv_id"], "messages": [
+                        {"from": r["from_agent"], "body": r["body"],
+                         "at": _iso(r["created_at"])} for r in nrows]}
+                    if bmore:
+                        entry["more"] = bmore
+                    out.append(entry)
+                    continue
                 rows = await c.fetch(
                     "SELECT id,from_agent,body,created_at FROM conv_messages "
                     f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id LIMIT $4::int",

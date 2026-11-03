@@ -100,6 +100,40 @@ async def test_default_poll_still_reserves_hook_delivered_no_theft(store):
     assert [m["body"] for o in i for m in o["messages"]] == ["m1"]
 
 
+async def test_join_starts_delivery_cursor_at_head_no_hook_flood(store):
+    # A room with history that predates the join: the Stop hook (box_view) must NOT push
+    # the backlog at the joiner (delivery cursor starts at the room head), while a
+    # deliberate interactive poll still catches up (interactive cursor starts at 0).
+    await store.create_room("r", "alice")
+    for i in range(5):
+        await store.say("r", "alice", f"old{i}")
+    await store.join("r", "bob")  # joins AFTER the 5 messages
+    assert await store.poll("bob", box=None, box_view=True) == []   # hook: nothing pushed
+    out = await store.poll("bob", box=None)                          # interactive: full backlog
+    assert [m["body"] for o in out for m in o["messages"]] == \
+        ["old0", "old1", "old2", "old3", "old4"]
+    await store.say("r", "alice", "new")                            # a message AFTER join
+    d = await store.poll("bob", box=None, box_view=True)
+    assert [m["body"] for o in d for m in o["messages"]] == ["new"]  # that one is delivered
+
+
+async def test_hook_delivery_is_capped_and_one_shot(store):
+    # A flood (more unread than the cap): box_view returns the NEWEST `cap` (chronological),
+    # marks the rest with "more", and advances the delivery cursor to the room head so it is
+    # ONE-SHOT — the next hook poll returns nothing, not the drained remainder. The skipped
+    # messages remain readable via the interactive poll.
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")  # joins empty
+    for i in range(25):
+        await store.say("r", "alice", f"m{i}")
+    d = await store.poll("bob", box=None, box_view=True, limit=3)
+    assert [m["body"] for o in d for m in o["messages"]] == ["m22", "m23", "m24"]
+    assert d[0]["more"] == 22
+    assert await store.poll("bob", box=None, box_view=True, limit=3) == []   # one-shot
+    i = await store.poll("bob", box=None, limit=0)                            # still pollable
+    assert len([m for o in i for m in o["messages"]]) == 25
+
+
 async def test_bare_box_catchall_cursor_is_independent(store):
     # The bare-box catch-all (agent_id == box) keeps a delivery cursor independent
     # from the interactive cursor: it can share a conv_members row with a
