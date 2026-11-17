@@ -182,10 +182,14 @@ class PostgresStore:
                 "SELECT 1 FROM agent_tokens WHERE box=$1 LIMIT 1", box))
 
     async def _collect(self, agent_id, room, box, advance, box_view, limit=None,
-                       only_new=False):
+                       only_new=False, exclude=None, newest_first=False):
         # box_view reuses $3 (agent) in the predicate exactly like board._self_filter;
         # extra is empty and $4 is used below only as the per-room LIMIT.
         pred, _extra = self_filter(agent_id, box, "from_agent", "$3", "$4", box_view=box_view)
+        # `exclude` (drop-box/muted rooms) applies ONLY to the all-rooms sweep; naming a
+        # room always reads it. A bulk catch-up thus skips chatty drop-boxes instead of
+        # burying the live room under their weeks-old backlog.
+        eff_exclude = exclude if (exclude and room is None) else frozenset()
         # Per-room cap: drain the OLDEST `limit` unread, leave the rest (cursor only
         # advances to the last RETURNED message), and tag the room with "more": N so a
         # busy backlog can't blow past the MCP output cap. limit<=0/None => no cap.
@@ -223,6 +227,8 @@ class PostgresStore:
                 "WHERE agent_id=$1 AND ($2::text IS NULL OR conv_id=$2) "
                 f"ORDER BY conv_id{lock}", agent_id, room)
             for m in members:
+                if m["conv_id"] in eff_exclude:
+                    continue
                 if box_view:
                     # Hook delivery is bounded and one-shot: show at most `dcap` of the
                     # NEWEST unread and catch the delivery cursor up to the room HEAD, so a
@@ -254,6 +260,48 @@ class PostgresStore:
                          "at": _iso(r["created_at"])} for r in nrows]}
                     if bmore:
                         entry["more"] = bmore
+                    out.append(entry)
+                    continue
+                if newest_first:
+                    # Catch-up-to-now (interactive opt-in): return the NEWEST `cap`
+                    # unread (chronological) and jump the read cursor to the room HEAD,
+                    # so "catch me up" lands at the present instead of paging up through
+                    # weeks of oldest-first backlog. Older unread passed over are reported
+                    # as "skipped": N (they are marked read, not retrievable by a later
+                    # poll — this is the deliberate cost of jumping to now). cap None
+                    # (limit=0) means no cap, so newest == all and nothing is skipped.
+                    nrows = await c.fetch(
+                        "SELECT id,from_agent,body,created_at FROM conv_messages "
+                        f"WHERE conv_id=$1 AND id>$2 AND {pred} ORDER BY id DESC LIMIT $4::int",
+                        m["conv_id"], m["cursor"], agent_id, cap)
+                    if not nrows:
+                        continue
+                    nrows = list(reversed(nrows))   # newest `cap`, chronological order
+                    skipped = 0
+                    if cap:
+                        total = int(await c.fetchval(
+                            f"SELECT count(*) FROM conv_messages "
+                            f"WHERE conv_id=$1 AND id>$2 AND {pred}",
+                            m["conv_id"], m["cursor"], agent_id))
+                        skipped = max(0, total - len(nrows))
+                    if advance:
+                        head = await c.fetchval(
+                            "SELECT COALESCE(MAX(id),0) FROM conv_messages WHERE conv_id=$1",
+                            m["conv_id"])
+                        if agent_id == box:
+                            await c.execute(
+                                "UPDATE conv_members SET last_read_id=$3 "
+                                "WHERE conv_id=$1 AND agent_id=$2", m["conv_id"], agent_id, head)
+                        else:
+                            await c.execute(
+                                "UPDATE conv_members SET last_read_id=$3, "
+                                "delivery_read_id=GREATEST(delivery_read_id,$3) "
+                                "WHERE conv_id=$1 AND agent_id=$2", m["conv_id"], agent_id, head)
+                    entry = {"conv": m["conv_id"], "messages": [
+                        {"from": r["from_agent"], "body": r["body"],
+                         "at": _iso(r["created_at"])} for r in nrows]}
+                    if skipped:
+                        entry["skipped"] = skipped
                     out.append(entry)
                     continue
                 rows = await c.fetch(
@@ -301,14 +349,16 @@ class PostgresStore:
         return out
 
     async def poll(self, agent_id, room=None, box=None, box_view=False, limit=None,
-                   only_new=False):
+                   only_new=False, exclude=None, newest_first=False):
         return await self._collect(agent_id, room, box, advance=True,
-                                   box_view=box_view, limit=limit, only_new=only_new)
+                                   box_view=box_view, limit=limit, only_new=only_new,
+                                   exclude=exclude, newest_first=newest_first)
 
     async def peek(self, agent_id, room=None, box=None, box_view=False, limit=None,
-                   only_new=False):
+                   only_new=False, exclude=None, newest_first=False):
         return await self._collect(agent_id, room, box, advance=False,
-                                   box_view=box_view, limit=limit, only_new=only_new)
+                                   box_view=box_view, limit=limit, only_new=only_new,
+                                   exclude=exclude, newest_first=newest_first)
 
     async def recent(self, agent_id, room, limit=20):
         # The caller's OWN latest messages in a room (newest first), so a sender can

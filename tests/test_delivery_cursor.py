@@ -148,6 +148,82 @@ async def test_bare_box_catchall_cursor_is_independent(store):
     assert await store.poll("work3", box="work3", box_view=False) == []
 
 
+async def test_newest_first_jumps_to_now_and_is_one_shot(store):
+    # Catch-up-to-now: newest_first returns the NEWEST `limit` unread (chronological),
+    # reports the older ones as "skipped", and jumps the interactive cursor to the room
+    # head so a second poll returns nothing (no paging up through weeks of oldest-first
+    # backlog). Contrast test_hook_delivery_is_capped_and_one_shot, which is the hook path.
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(25):
+        await store.say("r", "alice", f"m{i}")
+    out = await store.poll("bob", box=None, limit=3, newest_first=True)
+    assert [m["body"] for o in out for m in o["messages"]] == ["m22", "m23", "m24"]
+    assert out[0]["skipped"] == 22
+    # cursor jumped to head: the 22 older ones are now read, not re-served
+    assert await store.poll("bob", box=None, limit=3, newest_first=True) == []
+    assert await store.poll("bob", box=None, limit=0) == []
+
+
+async def test_newest_first_no_cap_returns_all_without_skipped(store):
+    # limit=0 => no cap, so newest == all and nothing is skipped (still chronological).
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(4):
+        await store.say("r", "alice", f"m{i}")
+    out = await store.poll("bob", box=None, limit=0, newest_first=True)
+    assert [m["body"] for o in out for m in o["messages"]] == ["m0", "m1", "m2", "m3"]
+    assert "skipped" not in out[0]
+
+
+async def test_peek_newest_first_does_not_advance_cursor(store):
+    # peek is read-only: newest_first shows the recent end but marks nothing read, so a
+    # later default poll still returns the whole backlog.
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    for i in range(10):
+        await store.say("r", "alice", f"m{i}")
+    p = await store.peek("bob", box=None, limit=2, newest_first=True)
+    assert [m["body"] for o in p for m in o["messages"]] == ["m8", "m9"]
+    assert p[0]["skipped"] == 8
+    # nothing consumed: the default oldest-first poll still has all 10
+    full = await store.poll("bob", box=None, limit=0)
+    assert len([m for o in full for m in o["messages"]]) == 10
+
+
+async def test_muted_room_skipped_on_sweep_but_read_when_named(store):
+    # A drop-box in `exclude` is skipped on the all-rooms sweep (conv=None) so its backlog
+    # can't bury the live room — but naming it explicitly still reads it in full, and the
+    # exclusion never touches a different room.
+    await store.create_room("parley-feedback", "alice")
+    await store.create_room("tio", "alice")
+    await store.join("parley-feedback", "bob")
+    await store.join("tio", "bob")
+    await store.say("parley-feedback", "alice", "old drop-box chatter")
+    await store.say("tio", "alice", "live message")
+    mute = {"parley-feedback"}
+    # sweep: only the live room, drop-box skipped
+    sweep = await store.peek("bob", box=None, exclude=mute)
+    assert [o["conv"] for o in sweep] == ["tio"]
+    # naming the muted room reads it regardless of exclude
+    named = await store.peek("bob", "parley-feedback", exclude=mute)
+    assert [m["body"] for o in named for m in o["messages"]] == ["old drop-box chatter"]
+    # a sweep with no mute set still sees both (exclusion is opt-in)
+    both = await store.peek("bob", box=None)
+    assert sorted(o["conv"] for o in both) == ["parley-feedback", "tio"]
+
+
+async def test_muted_sweep_does_not_advance_skipped_room_cursor(store):
+    # A muting poll (advance=True) must not consume the muted room: its cursor is
+    # untouched, so naming it afterwards still returns its backlog.
+    await store.create_room("parley-feedback", "alice")
+    await store.join("parley-feedback", "bob")
+    await store.say("parley-feedback", "alice", "m1")
+    assert await store.poll("bob", box=None, exclude={"parley-feedback"}) == []
+    named = await store.poll("bob", "parley-feedback")
+    assert [m["body"] for o in named for m in o["messages"]] == ["m1"]
+
+
 async def test_connect_migrates_old_db_missing_delivery_column(tmp_path):
     # A DB created before the delivery cursor (no delivery_read_id) must be migrated
     # by connect(), not crash on the box_view delivery path.

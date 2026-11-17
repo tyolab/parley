@@ -102,3 +102,47 @@ async def test_say_lock_timeout_fails_cleanly_without_writing():
         assert [m["body"] for m in await s.recent("bob", "r", 10)] == ["contended"]
     finally:
         await s.close()
+
+
+async def test_newest_first_jumps_to_now_and_is_one_shot_pg():
+    # PG path for the catch-up-to-now view: newest `limit` chronological, "skipped": N,
+    # and the interactive cursor jumps to head so a repeat poll returns nothing.
+    s = await fresh_store()
+    try:
+        await s.create_room("r", "alice")
+        await s.join("r", "bob")
+        for i in range(25):
+            await s.say("r", "alice", f"m{i}")
+        out = await s.poll("bob", box=None, limit=3, newest_first=True)
+        assert [m["body"] for o in out for m in o["messages"]] == ["m22", "m23", "m24"]
+        assert out[0]["skipped"] == 22
+        assert await s.poll("bob", box=None, limit=3, newest_first=True) == []
+        assert await s.poll("bob", box=None, limit=0) == []
+        # no cap => all, nothing skipped
+        await s.say("r", "alice", "later")
+        out2 = await s.poll("bob", box=None, limit=0, newest_first=True)
+        assert [m["body"] for o in out2 for m in o["messages"]] == ["later"]
+        assert "skipped" not in out2[0]
+    finally:
+        await s.close()
+
+
+async def test_muted_room_skipped_on_sweep_but_read_when_named_pg():
+    # PG path for drop-box muting: a room in `exclude` is skipped on the all-rooms sweep
+    # (and its cursor untouched), but a named read ignores the exclusion.
+    s = await fresh_store()
+    try:
+        await s.create_room("parley-feedback", "alice")
+        await s.create_room("tio", "alice")
+        await s.join("parley-feedback", "bob")
+        await s.join("tio", "bob")
+        await s.say("parley-feedback", "alice", "drop-box chatter")
+        await s.say("tio", "alice", "live message")
+        mute = {"parley-feedback"}
+        sweep = await s.poll("bob", box=None, exclude=mute)
+        assert [o["conv"] for o in sweep] == ["tio"]
+        # muted room's cursor was not advanced by the sweep: still fully readable by name
+        named = await s.poll("bob", "parley-feedback", exclude=mute)
+        assert [m["body"] for o in named for m in o["messages"]] == ["drop-box chatter"]
+    finally:
+        await s.close()

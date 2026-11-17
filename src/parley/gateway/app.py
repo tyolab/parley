@@ -1,12 +1,11 @@
 import asyncio
 import datetime
 import hmac
-import os
 import re
 
 from fastapi import FastAPI, HTTPException, Request
 
-from parley.core.store import extract_mentions
+from parley.core.store import extract_mentions, muted_rooms
 from parley.gateway.identity import _bearer, resolve_identity
 
 _BOX_RE = r"[A-Za-z0-9._-]+"
@@ -21,14 +20,6 @@ DEFAULT_POLL_LIMIT = 50
 # backlog from flooding an agent's turn — and the user's terminal scrollback — regardless
 # of what caused it (first join, re-join, or a reboot-fresh session).
 DELIVER_CAP = 10
-
-# Rooms excluded from Stop-hook push entirely: drop-boxes that agents post TO but should
-# never RECEIVE via the hook (e.g. the feedback room — chatty, and nobody needs it pushed).
-# They remain fully readable via an explicit poll/peek. Comma-separated, override via env.
-NO_PUSH_ROOMS = {r.strip() for r in
-                 os.environ.get("PARLEY_NO_PUSH_ROOMS", "parley-feedback").split(",")
-                 if r.strip()}
-
 
 def build_app(store, transport, admin_token: str | None = None,
               *, token: str | None = None,
@@ -216,35 +207,41 @@ def build_app(store, transport, admin_token: str | None = None,
 
     @app.get("/poll")
     async def poll(request: Request, room: str | None = None, limit: int | None = None,
-                   only_new: bool = False):
+                   only_new: bool = False, newest_first: bool = False):
         agent_id, box, _is_admin = await _identify(request)
         block = await _room_block(agent_id, room)
         if block:
             return block
         lim = DEFAULT_POLL_LIMIT if limit is None else limit
+        # Drop-box rooms are skipped only on the all-rooms sweep; naming one still reads it.
+        exclude = muted_rooms() if room is None else None
         return {"conversations": await store.poll(agent_id, room, box=box, limit=lim,
-                                                  only_new=only_new)}
+                                                  only_new=only_new, exclude=exclude,
+                                                  newest_first=newest_first)}
 
     @app.get("/deliver")
     async def deliver(request: Request, room: str | None = None, limit: int | None = None):
         agent_id, box, _is_admin = await _identify(request)
         lim = DELIVER_CAP if limit is None else limit
-        convs = await store.poll(agent_id, room, box=box, box_view=True, limit=lim)
-        # No-push rooms are posted to but never delivered via the hook.
-        if NO_PUSH_ROOMS:
-            convs = [c for c in convs if c.get("conv") not in NO_PUSH_ROOMS]
+        # Drop-box rooms are posted to but never delivered via the hook (push); exclude
+        # them on the catch-all sweep. A named /deliver (room set) is unaffected.
+        exclude = muted_rooms() if room is None else None
+        convs = await store.poll(agent_id, room, box=box, box_view=True, limit=lim,
+                                 exclude=exclude)
         return {"conversations": convs}
 
     @app.get("/peek")
     async def peek(request: Request, room: str | None = None, limit: int | None = None,
-                   only_new: bool = False):
+                   only_new: bool = False, newest_first: bool = False):
         agent_id, box, _is_admin = await _identify(request)
         block = await _room_block(agent_id, room)
         if block:
             return block
         lim = DEFAULT_POLL_LIMIT if limit is None else limit
+        exclude = muted_rooms() if room is None else None
         return {"conversations": await store.peek(agent_id, room, box=box, limit=lim,
-                                                  only_new=only_new)}
+                                                  only_new=only_new, exclude=exclude,
+                                                  newest_first=newest_first)}
 
     @app.get("/rooms")
     async def list_rooms(request: Request):

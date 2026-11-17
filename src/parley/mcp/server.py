@@ -1,6 +1,6 @@
 import contextvars
 
-from parley.core.store import extract_mentions
+from parley.core.store import extract_mentions, muted_rooms
 from parley.gateway.identity import resolve_identity
 
 current_agent_id = contextvars.ContextVar("parley_agent_id", default=None)
@@ -116,7 +116,7 @@ def build_mcp_app(store, admin_token):
 
     @mcp.tool()
     async def poll_convs(conv: str | None = None, limit: int = 50,
-                         only_new: bool = False) -> dict:
+                         only_new: bool = False, newest_first: bool = False) -> dict:
         """Unread messages across my conversations (or one), delivered once.
 
         Each room returns at most `limit` of its OLDEST unread messages; if a room has
@@ -124,31 +124,48 @@ def build_mcp_app(store, admin_token):
         next batch. This keeps a busy backlog from overflowing the tool output. Raise
         `limit` for bigger batches, or pass limit=0 for no cap (use with care).
 
+        newest_first=True is CATCH-UP-TO-NOW: each room returns its NEWEST `limit` unread
+        and the read cursor jumps to the present, so a weeks-behind room lands you at
+        today instead of paging up from the oldest end. Older unread passed over are
+        reported as "skipped": N and are marked read (not re-served by a later poll) —
+        the deliberate cost of jumping to now. Use this for '/catchup' on a busy room;
+        use the default (oldest-first, nothing skipped) when you need every message.
+
         only_new=True returns only messages the Stop-hook has NOT already delivered to
         this session (reads past the delivery cursor too), so a backlog you already
         received and acted on via the hook is not re-served. Use it for catch-up when
         the hook is your primary delivery path. The default (only_new=False) still
-        returns everything since your last explicit read, hook deliveries included."""
+        returns everything since your last explicit read, hook deliveries included.
+
+        A no-arg sweep (conv=None) skips drop-box rooms like 'parley-feedback' so their
+        backlog can't bury the live conversation; name such a room to read it."""
         agent = _agent()
         err = await _room_error(conv, agent)
         if err:
             return err
+        exclude = muted_rooms() if conv is None else None
         return {"conversations": await store.poll(agent, conv, box=current_box.get(),
-                                                  limit=limit, only_new=only_new)}
+                                                  limit=limit, only_new=only_new,
+                                                  exclude=exclude, newest_first=newest_first)}
 
     @mcp.tool()
     async def peek_convs(conv: str | None = None, limit: int = 50,
-                         only_new: bool = False) -> dict:
+                         only_new: bool = False, newest_first: bool = False) -> dict:
         """Like poll_convs but read-only (does not advance the read cursor). Same
-        per-room `limit`/"more" capping (limit=0 = no cap) and the same `only_new`
-        option. A named room that does not exist, or that you have not joined, returns
-        an explicit `error` (not an empty result)."""
+        per-room `limit`/"more" capping (limit=0 = no cap), the same `only_new` option,
+        and the same `newest_first` catch-up view (newest `limit` per room, with
+        "skipped": N for older unread — but since peek never advances, nothing is
+        actually marked read). A no-arg sweep skips drop-box rooms like 'parley-feedback'.
+        A named room that does not exist, or that you have not joined, returns an explicit
+        `error` (not an empty result)."""
         agent = _agent()
         err = await _room_error(conv, agent)
         if err:
             return err
+        exclude = muted_rooms() if conv is None else None
         return {"conversations": await store.peek(agent, conv, box=current_box.get(),
-                                                  limit=limit, only_new=only_new)}
+                                                  limit=limit, only_new=only_new,
+                                                  exclude=exclude, newest_first=newest_first)}
 
     @mcp.tool()
     async def my_recent(conv: str, limit: int = 20) -> dict:

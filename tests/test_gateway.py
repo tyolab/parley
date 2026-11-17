@@ -166,3 +166,30 @@ async def test_token_required_when_configured():
         ok = await c.get("/poll", headers={"X-Parley-Agent": "a", "Authorization": "Bearer s3cret"})
         assert ok.status_code == 200
     await store.close()
+
+
+async def test_poll_http_newest_first_and_mutes_dropbox(client):
+    # Two rooms: a drop-box ('parley-feedback', muted by default) and a live room with a
+    # backlog. Through the HTTP layer: a no-arg poll skips the drop-box, and newest_first
+    # returns the recent end with "skipped": N.
+    for name in ("parley-feedback", "tio"):
+        await client.post("/rooms", json={"name": name})
+        await client.post(f"/rooms/{name}/join", headers=bob_headers())
+    await client.post("/rooms/parley-feedback/messages", json={"body": "old chatter"})
+    for i in range(5):
+        await client.post("/rooms/tio/messages", json={"body": f"m{i}"})
+    # no-arg sweep: drop-box skipped, only the live room comes back
+    sweep = (await client.get("/poll", headers=bob_headers())).json()["conversations"]
+    assert [c["conv"] for c in sweep] == ["tio"]
+    # newest_first on the named live room (fresh member, re-join to reset cursor for test):
+    await client.post("/rooms/tio/leave", headers=bob_headers())
+    await client.post("/rooms/tio/join", headers=bob_headers())
+    nf = (await client.get("/poll", headers=bob_headers(),
+                           params={"room": "tio", "limit": 2, "newest_first": True})).json()
+    msgs = nf["conversations"][0]
+    assert [m["body"] for m in msgs["messages"]] == ["m3", "m4"]
+    assert msgs["skipped"] == 3
+    # the drop-box is still readable when named explicitly
+    named = (await client.get("/poll", headers=bob_headers(),
+                              params={"room": "parley-feedback"})).json()["conversations"]
+    assert [m["body"] for m in named[0]["messages"]] == ["old chatter"]

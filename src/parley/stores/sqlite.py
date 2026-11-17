@@ -184,9 +184,13 @@ class SqliteStore:
         return (await cur.fetchone()) is not None
 
     async def _collect(self, agent_id, room, box, advance, box_view, limit=None,
-                       only_new=False):
+                       only_new=False, exclude=None, newest_first=False):
         pred, _extra = self_filter(agent_id, box, "from_agent", ":agent", ":box",
                                    box_view=box_view)
+        # `exclude` (drop-box/muted rooms) applies ONLY to the all-rooms sweep; naming a
+        # room always reads it. A bulk catch-up thus skips chatty drop-boxes instead of
+        # burying the live room under their weeks-old backlog.
+        eff_exclude = exclude if (exclude and room is None) else frozenset()
         # Per-room cap: drain the OLDEST `limit` unread, leave the rest (cursor only
         # advances to the last RETURNED message), and tag the room with "more": N so a
         # busy backlog can't blow past the MCP output cap. limit<=0/None => no cap.
@@ -222,6 +226,8 @@ class SqliteStore:
                 (agent_id, room, room))
             members = await cur.fetchall()
             for m in members:
+                if m["conv_id"] in eff_exclude:
+                    continue
                 if box_view:
                     # Hook delivery is bounded and one-shot: show at most `dcap` of the
                     # NEWEST unread and catch the delivery cursor up to the room HEAD, so a
@@ -258,6 +264,53 @@ class SqliteStore:
                         for r in nrows]}
                     if bmore:
                         entry["more"] = bmore
+                    out.append(entry)
+                    continue
+                if newest_first:
+                    # Catch-up-to-now (interactive opt-in): return the NEWEST `cap`
+                    # unread (chronological) and jump the read cursor to the room HEAD,
+                    # so "catch me up" lands at the present instead of paging up through
+                    # weeks of oldest-first backlog. Older unread passed over are reported
+                    # as "skipped": N (marked read, not retrievable by a later poll — the
+                    # deliberate cost of jumping to now). cap None (limit=0) => no cap, so
+                    # newest == all and nothing is skipped.
+                    args = {"conv": m["conv_id"], "last": m["cursor"],
+                            "agent": agent_id, "box": box}
+                    nc = await self._db.execute(
+                        "SELECT id,from_agent,body,created_at FROM conv_messages "
+                        f"WHERE conv_id=:conv AND id>:last AND {pred} ORDER BY id DESC LIMIT :lim",
+                        {**args, "lim": cap if cap else -1})
+                    nrows = await nc.fetchall()
+                    if not nrows:
+                        continue
+                    nrows = list(reversed(nrows))   # newest `cap`, chronological order
+                    skipped = 0
+                    if cap:
+                        tc = await self._db.execute(
+                            f"SELECT count(*) AS n FROM conv_messages "
+                            f"WHERE conv_id=:conv AND id>:last AND {pred}", args)
+                        total = int((await tc.fetchone())["n"])
+                        skipped = max(0, total - len(nrows))
+                    if advance:
+                        hc = await self._db.execute(
+                            "SELECT COALESCE(MAX(id),0) AS h FROM conv_messages WHERE conv_id=?",
+                            (m["conv_id"],))
+                        head = (await hc.fetchone())["h"]
+                        if agent_id == box:
+                            await self._db.execute(
+                                "UPDATE conv_members SET last_read_id=? "
+                                "WHERE conv_id=? AND agent_id=?", (head, m["conv_id"], agent_id))
+                        else:
+                            await self._db.execute(
+                                "UPDATE conv_members SET last_read_id=?, "
+                                "delivery_read_id=max(delivery_read_id,?) "
+                                "WHERE conv_id=? AND agent_id=?",
+                                (head, head, m["conv_id"], agent_id))
+                    entry = {"conv": m["conv_id"], "messages": [
+                        {"from": r["from_agent"], "body": r["body"], "at": r["created_at"]}
+                        for r in nrows]}
+                    if skipped:
+                        entry["skipped"] = skipped
                     out.append(entry)
                     continue
                 q = ("SELECT id,from_agent,body,created_at FROM conv_messages "
@@ -310,14 +363,16 @@ class SqliteStore:
         return out
 
     async def poll(self, agent_id, room=None, box=None, box_view=False, limit=None,
-                   only_new=False):
+                   only_new=False, exclude=None, newest_first=False):
         return await self._collect(agent_id, room, box, advance=True,
-                                   box_view=box_view, limit=limit, only_new=only_new)
+                                   box_view=box_view, limit=limit, only_new=only_new,
+                                   exclude=exclude, newest_first=newest_first)
 
     async def peek(self, agent_id, room=None, box=None, box_view=False, limit=None,
-                   only_new=False):
+                   only_new=False, exclude=None, newest_first=False):
         return await self._collect(agent_id, room, box, advance=False,
-                                   box_view=box_view, limit=limit, only_new=only_new)
+                                   box_view=box_view, limit=limit, only_new=only_new,
+                                   exclude=exclude, newest_first=newest_first)
 
     async def recent(self, agent_id, room, limit=20):
         # The caller's OWN latest messages in a room (newest first), so a sender can

@@ -1,5 +1,17 @@
+import os
 import re
 from typing import Protocol
+
+
+def muted_rooms() -> set[str]:
+    """Rooms excluded from a no-arg (bulk) catch-up poll/peek and from Stop-hook push:
+    chatty drop-boxes an agent posts TO but should not be flooded BY (e.g. the feedback
+    room). They stay fully readable by NAMING the room explicitly; only the all-rooms
+    sweep skips them, so a weeks-old drop-box backlog can't bury the live conversation.
+    Comma-separated; override via PARLEY_NO_PUSH_ROOMS (empty string disables muting)."""
+    return {r.strip() for r in
+            os.environ.get("PARLEY_NO_PUSH_ROOMS", "parley-feedback").split(",")
+            if r.strip()}
 
 # A mention is '@' at the start or after whitespace, then a handle (box, box-slug,
 # or box-slug#N). Requiring the leading boundary stops email addresses (foo@bar.com)
