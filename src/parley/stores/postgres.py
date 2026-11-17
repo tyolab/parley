@@ -363,13 +363,24 @@ class PostgresStore:
     async def recent(self, agent_id, room, limit=20):
         # The caller's OWN latest messages in a room (newest first), so a sender can
         # verify what landed after an ambiguous error. peek/poll never show own messages.
+        # Each message is annotated with per-recipient delivery (received_by / pending):
+        # a member has RECEIVED it if either cursor is at or past its id (delivered by the
+        # hook, read explicitly, or caught-up-past at join) — so a sender can SEE a message
+        # that committed but never reached someone, instead of learning it days later.
         lim = limit if (limit and limit > 0) else 20
         async with self._pool.acquire() as c:
             rows = await c.fetch(
                 "SELECT id,body,created_at FROM conv_messages "
                 "WHERE conv_id=$1 AND from_agent=$2 ORDER BY id DESC LIMIT $3",
                 room, agent_id, lim)
-        return [{"id": r["id"], "body": r["body"], "at": _iso(r["created_at"])} for r in rows]
+            mrows = await c.fetch(
+                "SELECT agent_id, GREATEST(last_read_id, delivery_read_id) AS cur "
+                "FROM conv_members WHERE conv_id=$1 AND agent_id<>$2", room, agent_id)
+        others = [(m["agent_id"], m["cur"]) for m in mrows]
+        return [{"id": r["id"], "body": r["body"], "at": _iso(r["created_at"]),
+                 "received_by": [a for a, cur in others if cur >= r["id"]],
+                 "pending": [a for a, cur in others if cur < r["id"]]}
+                for r in rows]
 
     async def list_rooms(self, agent_id, box=None):
         pred, _extra = self_filter(agent_id, box, "x.from_agent", "$1", "$2")

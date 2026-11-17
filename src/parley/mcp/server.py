@@ -173,7 +173,14 @@ def build_mcp_app(store, admin_token):
         ambiguous send (e.g. a 500/timeout) to see what actually landed before retrying,
         since peek_convs/poll_convs never return your own messages. For a "did my last
         send land?" check pass limit=1 or 2 -- the default 20 returns a lot of text to
-        answer a question about a single message."""
+        answer a question about a single message.
+
+        Each message also reports per-recipient delivery: "received_by" (members whose
+        cursor is at or past it -- delivered by the hook, read, or caught-up-past at join)
+        and "pending" (members who have NOT reached it yet). So a message that committed
+        but never got to someone shows them in "pending" -- catch it now instead of days
+        later from a human. (A member only pending because they are idle will clear once
+        they next poll or the hook delivers; a long-pending ACTIVE member is the red flag.)"""
         agent = _agent()
         err = await _room_error(conv, agent)
         if err:

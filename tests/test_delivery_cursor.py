@@ -224,6 +224,26 @@ async def test_muted_sweep_does_not_advance_skipped_room_cursor(store):
     assert [m["body"] for o in named for m in o["messages"]] == ["m1"]
 
 
+async def test_recent_annotates_per_recipient_delivery(store):
+    # A sender can SEE who has/hasn't received each of their messages, so a committed-but-
+    # undelivered send is caught at a glance instead of days later. "received" = either
+    # cursor at/past the id (hook-delivered OR explicitly read); "pending" = not yet.
+    await store.create_room("r", "alice")
+    await store.join("r", "bob")
+    await store.join("r", "carol")
+    await store.say("r", "alice", "handoff")
+    rec = await store.recent("alice", "r", 5)
+    assert rec[0]["received_by"] == [] and sorted(rec[0]["pending"]) == ["bob", "carol"]
+    # bob reads it interactively -> received; carol still pending (the hilia failure shape)
+    await store.poll("bob", box=None)
+    rec = await store.recent("alice", "r", 5)
+    assert rec[0]["received_by"] == ["bob"] and rec[0]["pending"] == ["carol"]
+    # carol gets it via the Stop-hook (box_view delivery) -> received too, pending empties
+    await store.poll("carol", box=None, box_view=True)
+    rec = await store.recent("alice", "r", 5)
+    assert sorted(rec[0]["received_by"]) == ["bob", "carol"] and rec[0]["pending"] == []
+
+
 async def test_connect_migrates_old_db_missing_delivery_column(tmp_path):
     # A DB created before the delivery cursor (no delivery_read_id) must be migrated
     # by connect(), not crash on the box_view delivery path.

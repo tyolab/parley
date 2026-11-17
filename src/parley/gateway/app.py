@@ -182,7 +182,8 @@ def build_app(store, transport, admin_token: str | None = None,
     async def mine(request: Request, name: str, limit: int = 20):
         # Read back my OWN recent messages in a room, so after an ambiguous send error
         # I can see what actually landed before deciding to retry (peek/poll never
-        # return my own messages).
+        # return my own messages). Each message also carries per-recipient delivery
+        # (received_by / pending) so a committed-but-undelivered send is visible.
         agent_id, _box, _is_admin = await _identify(request)
         block = await _room_block(agent_id, name)
         if block:

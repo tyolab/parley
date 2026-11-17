@@ -146,3 +146,22 @@ async def test_muted_room_skipped_on_sweep_but_read_when_named_pg():
         assert [m["body"] for o in named for m in o["messages"]] == ["drop-box chatter"]
     finally:
         await s.close()
+
+
+async def test_recent_per_recipient_delivery_pg():
+    # PG path for the delivery annotation: received_by / pending track each member's
+    # furthest cursor, so a sender sees a message that reached nobody.
+    s = await fresh_store()
+    try:
+        await s.create_room("r", "alice")
+        await s.join("r", "bob")
+        await s.join("r", "carol")
+        await s.say("r", "alice", "handoff")
+        rec = await s.recent("alice", "r", 5)
+        assert rec[0]["received_by"] == [] and sorted(rec[0]["pending"]) == ["bob", "carol"]
+        await s.poll("bob", box=None)                       # bob reads -> received
+        await s.poll("carol", box=None, box_view=True)      # carol via hook -> received
+        rec = await s.recent("alice", "r", 5)
+        assert sorted(rec[0]["received_by"]) == ["bob", "carol"] and rec[0]["pending"] == []
+    finally:
+        await s.close()

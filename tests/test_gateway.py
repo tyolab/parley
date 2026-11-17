@@ -193,3 +193,14 @@ async def test_poll_http_newest_first_and_mutes_dropbox(client):
     named = (await client.get("/poll", headers=bob_headers(),
                               params={"room": "parley-feedback"})).json()["conversations"]
     assert [m["body"] for m in named[0]["messages"]] == ["old chatter"]
+
+
+async def test_mine_reports_per_recipient_delivery(client):
+    await client.post("/rooms", json={"name": "r"})
+    await client.post("/rooms/r/join", headers=bob_headers())
+    await client.post("/rooms/r/messages", json={"body": "did you get this?"})
+    r = (await client.get("/rooms/r/mine")).json()["messages"][0]
+    assert r["received_by"] == [] and r["pending"] == ["bob"]   # bob hasn't read it yet
+    await client.get("/poll", headers=bob_headers())            # bob reads
+    r = (await client.get("/rooms/r/mine")).json()["messages"][0]
+    assert r["received_by"] == ["bob"] and r["pending"] == []
